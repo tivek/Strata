@@ -5,6 +5,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +46,25 @@ class InterpreterPins(unittest.TestCase):
 
 
 class WheelLocks(unittest.TestCase):
+    def test_cross_platform_resolution_includes_target_markers_and_mask_wheel_tag(self):
+        import lock_wheels
+        seen = []
+        def download(command, **kwargs):
+            inputs = Path(command[command.index("-r") + 1]).read_text()
+            seen.append((command, inputs))
+            wheel_dir = Path(command[command.index("-d") + 1])
+            (wheel_dir / "example-1.0-py3-none-any.whl").write_bytes(b"wheel fixture")
+        with mock.patch.object(lock_wheels.subprocess, "run", side_effect=download):
+            lock_wheels.build_lock("windows-x86_64")
+            lock_wheels.build_lock("linux-x86_64")
+        self.assertIn("colorama==0.4.6", seen[0][1])
+        self.assertNotIn("colorama", seen[1][1])
+        for command, inputs in seen:
+            self.assertIn("llguidance==1.9.1", inputs)
+            self.assertIn("jsonschema==4.26.0", inputs)
+            self.assertNotIn(";", inputs)
+        self.assertIn("manylinux_2_31_x86_64", seen[1][0])
+
     def locks(self):
         found = sorted((ROOT / "packaging" / "locks").glob("runtime-*-cp312.txt"))
         self.assertEqual([p.name for p in found], ["runtime-darwin-arm64-cp312.txt", "runtime-linux-x86_64-cp312.txt",

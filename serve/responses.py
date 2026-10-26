@@ -28,6 +28,7 @@ import time
 import uuid
 
 from serve.frontend import Event, _late_system_to_user, _parts_of, effort_kwargs
+from serve.structured import StructuredOutputError
 
 ENCRYPTED_PREFIX = "strata.r1:"                   # our own reasoning replay strings; others' are ignored
 HOSTED_TOOLS = ("web_search", "web_search_preview", "file_search", "computer_use_preview", "computer_use",
@@ -472,7 +473,7 @@ class Assembler:
         self.seq = 0
         self.item = None                             # the open output item
         self.json_text = []                          # structured output: the answer, held until it is checked
-        self.called = False                          # a tool call was made: this turn is not the final answer
+        self.called = False                          # a tool call was made; forbidden in structured output
         reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
         self.response = {
             "id": new_id("resp"), "object": "response", "created_at": int(time.time()), "status": "in_progress",
@@ -550,6 +551,8 @@ class Assembler:
     def feed(self, ev: Event) -> list[dict]:
         out = []
         kind = ev.kind
+        if self.json_mode and kind in ("tool_start", "tool_args", "tool_call"):
+            raise StructuredOutputError("structured output cannot contain parsed tool calls")
         if kind == "reasoning":
             if not ev.text:
                 return out
@@ -606,7 +609,7 @@ class Assembler:
         return out
 
     def _release(self, text: str) -> list[dict]:
-        """A held structured answer (or the words written beside a tool call) as one message item."""
+        """Release a validated structured answer as one message item."""
         if not text.strip():
             return []
         out = self._open({"id": new_id("msg"), "type": "message", "status": "in_progress", "role": "assistant",
@@ -617,15 +620,11 @@ class Assembler:
         return out + self.close()
 
     def _call_started(self) -> list[dict]:
-        """The first tool call of a JSON-format turn: this turn is not the final answer, so what the model wrote
-        before the call goes out as it is, ahead of the call, and the schema is checked on the turn that ends in
-        text (#782)."""
-        out = []
-        if self.json_mode and not self.called:
-            out = self._release("".join(self.json_text))
-            self.json_text = []
+        """Record a call in an ordinary Responses turn. Structured turns cannot release tool-adjacent text."""
+        if self.json_mode:
+            raise StructuredOutputError("structured output cannot contain parsed tool calls")
         self.called = True
-        return out
+        return []
 
     def _call_item(self, ev: Event) -> dict:
         namespace, name, kind = self.names.get(ev.call.name, (None, ev.call.name, "function"))
@@ -642,17 +641,21 @@ class Assembler:
     def finish(self, done: dict, validate=None) -> list[dict]:
         """The end: close what is open, then response.completed (or .incomplete when max_output_tokens ran out).
         `validate(text, finish)` checks a structured answer and returns its text (or raises)."""
+        if self.json_mode:
+            # Defense in depth if a future parser or assembler path misses feed()'s guard.
+            if self.called or any(item["type"] in ("function_call", "custom_tool_call")
+                                  for item in self.response["output"]):
+                raise StructuredOutputError("structured output cannot contain parsed tool calls")
+            if validate is None:
+                raise StructuredOutputError("structured output requires independent validation")
+            text = validate("".join(self.json_text), done.get("finish"))
         length = done.get("finish") == "length"
         # a call still open was cut off (its tool_call never came, #211): incomplete, whatever the finish
         unfinished = self.item is not None and self.item["type"] in ("function_call", "custom_tool_call")
         out = self.close("incomplete" if length or unfinished else "completed")
         if self.json_mode:
-            text = "".join(self.json_text)
             self.json_text = []
-            if self.called:
-                out += self._release(text)           # beside a tool call: as written (#782)
-            else:
-                out += self._release(validate(text, done.get("finish")))
+            out += self._release(text)
         n = done.get("completion_tokens", 0)
         prompt = done.get("prompt_tokens", self.prompt_tokens)
         self.response["usage"] = {

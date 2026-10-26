@@ -13,20 +13,18 @@ engine that said token_mask=2 sends them); the server answers on stdin with one 
     MKN <n> <b0> ...    constrained, n rows: row i is the mask for the token after the engine's i-th draft (the same
                         encoding as MK).  Only sent in answer to `MQ d...`; an engine that knows only MK never sees it.
 
-The grammar is the request's JSON schema (json_object: any object), and with tools also "<tool_call> + anything": a
-turn that calls tools stays a tool call (the server's own parser reads it), a turn that answers is the schema's JSON
-token for token.  Leading whitespace is allowed before either.  The thinking is not constrained: the mask starts
+The grammar is the request's JSON schema (json_object: any object). Tools with structured output are rejected.
+Leading whitespace is allowed. The thinking is not constrained: the mask starts
 after </think> (or at once when the prompt has already closed it, i.e. thinking off).
 
-llguidance is optional (`pip install llguidance`): without it, or with an engine that does not say token_mask=1 or
-token_mask=2, nothing changes - the prompt directive and the validation after the turn (serve/structured.py) remain
-the contract.
-The validation also stays ON with the mask: it is the check that the mask and the schema agree, not the guarantee.
+json_schema requires an operational backend. Failures are fatal to the request;
+the independent validator in serve/structured.py remains mandatory.
 """
 from __future__ import annotations
 import base64
 import json
 import threading
+from serve.structured import StructuredOutputError, check_supported_schema
 
 try:
     import llguidance as _llg
@@ -97,7 +95,11 @@ class _Wrapper:
     def __call__(self, s):
         if isinstance(s, (bytes, bytearray)):
             s = bytes(s).decode("utf-8", errors="replace")
-        return list(self.tok.encode(s))
+        # Grammar text is literal text. Strata's type-4 tokens are otherwise
+        # recognized even with parse_special=False, including inside JSON strings.
+        # Inserting such a control token into llguidance's forced tokens makes
+        # consume_token reject a string that its grammar and mask just accepted.
+        return list(self.tok.encode(s, plain=[(0, len(s))]))
 
 
 class Vocab:
@@ -154,23 +156,20 @@ def format_of(sampling: dict):
 
 
 def grammar(rf: dict, with_tools: bool, vocab: Vocab) -> str:
-    """The Lark grammar: optional whitespace, then the schema's JSON - or, with tools, a tool call."""
+    """The Lark grammar: optional whitespace, then the schema's JSON."""
+    if with_tools:
+        raise ValueError("structured output with tools is not supported")
     if rf["type"] == "json_object":
         schema = {"type": "object"}
     else:
         schema = (rf.get("json_schema") or {}).get("schema")
         if not isinstance(schema, dict):
             raise ValueError("json_schema without a schema object")
+    check_supported_schema(schema)
     lines = ["start: WS? answer",
              "WS: /[ \\t\\r\\n]+/",
-             "answer: json" + (" | calls" if with_tools else ""),
+             "answer: json",
              "json: %json " + json.dumps(schema, ensure_ascii=False)]
-    if with_tools:
-        # the call itself is not constrained here: the server's tool-call parser reads it as it always did.
-        # Anything may follow the opening tag - a tokenizer that writes <tool_call> as plain text (no special
-        # token, so feed() cannot free the turn) must still be able to finish the call.
-        lines += [f"calls: {vocab.literal(TOOL_CALL)} REST",
-                  "REST: /[\\s\\S]*/"]
     return _llg.LLMatcher.grammar_from_lark("\n".join(lines) + "\n")
 
 
@@ -202,10 +201,8 @@ def masks_for_window(m, drafts, cut_ids):
     done = 0
     try:
         for d in drafts[:k]:                  # consume one draft at a time, one row of the window per step
-            if not m.consume_tokens([d]):     # accepted on the copy, so this should not happen; keep the rows so far (1-5)
-                note_once("constrained decoding: a validated draft was refused during the mask lookahead; "
-                          "the masked window keeps the rows up to it")
-                break
+            if not m.consume_tokens([d]):
+                raise StructuredOutputError("constrained decoding failed while advancing a validated draft")
             done += 1
             if m.is_stopped():
                 # the grammar ends here.  Every draft was consumed (the engine will ask for the token after
@@ -229,42 +226,78 @@ class Constraint:
         self.m = _llg.LLMatcher(vocab.lltok, grammar_text, log_level=0)
         if self.m.is_error():
             raise ValueError(f"grammar: {self.m.get_error()}")
+        if self.m.get_grammar_warnings():
+            raise ValueError("schema compilation produced warnings; constrained decoding cannot enforce this schema")
         self.tail = b""
-        self.failed = None                  # why the mask was given up (the validation after the turn then decides)
+        self.failed = None                  # terminal request failure; never becomes free sampling
         self.masked = 0                     # tokens decoded under a mask (diagnostics, tests)
-        self.tool_call = vocab.single(TOOL_CALL) # its id, when the model has one token for it
 
     # --- the engine's question
     def active(self) -> bool:
-        return self.armed and self.failed is None and not self.m.is_error()
+        if self.failed is not None or self.m.is_error():
+            self.fail("the grammar state failed")
+        return self.armed
+
+    def fail(self, reason):
+        self.failed = reason
+        raise StructuredOutputError("constrained decoding failed: " + reason)
+
+    def checked_mask(self, bits):
+        if not isinstance(bits, bytes) or len(bits) != 4 * ((self.vocab.n + 31) // 32):
+            self.fail("missing token mask or incorrect mask size")
+        if not int.from_bytes(bits, "little") & ((1 << self.vocab.n) - 1):
+            self.fail("the token mask allows no token")
+        return bits
+
+    def computed_mask(self, bits):
+        # llguidance 1.9.1's SimpleVob stores n//32 + 1 words, including a
+        # zero spare word for a word-aligned vocabulary (Qwen: 248320 tokens).
+        # Transport only the model's words; all other widths/padding are errors.
+        width = 4 * ((self.vocab.n + 31) // 32)
+        if isinstance(bits, bytes) and self.vocab.n % 32 == 0 and len(bits) == width + 4 and bits[-4:] == b"\0" * 4:
+            bits = bits[:width]
+        return self.checked_mask(bits)
 
     def mask(self) -> bytes | None:
         """The packed mask for the next token, or None when the next token is free."""
         if not self.active():
             return None
-        return self.m.compute_bitmask()
+        try:
+            return self.computed_mask(self.m.compute_bitmask())
+        except StructuredOutputError:
+            raise
+        except Exception as exc:
+            self.fail("token-mask computation failed")
 
     def reply(self, drafts=None) -> str:
         """The answer to the engine's MQ line (without the newline).  `drafts` (1-2): the engine's draft tokens
         for this window, sent only by an engine that said token_mask=2; empty or None keeps the one-row answer."""
-        if drafts and self.armed and self.failed is None and not self.m.is_error():
+        active = self.active()
+        if drafts and active:
             try:
                 masks = masks_for_window(self.m, drafts, self.vocab.cut_ids)
-            except Exception as e:                        # 1-5: rollback or matcher failure - drop the mask, log it
-                self.failed = str(e).splitlines()[0][:160] or "mask lookahead failed"
-                note_once(f"constrained decoding: gave the mask up in a turn ({self.failed}); "
-                          "the turn is validated after")
+            except Exception:
+                self.fail("token-mask lookahead or rollback failed")
             else:
+                masks = [self.computed_mask(bits) for bits in masks]
+                if not masks or len(masks) > len(drafts) + 1:
+                    self.fail("incorrect number of token-mask rows")
                 self.masked += len(masks)
                 if len(masks) == 1:                       # 1-3: one row keeps the current MK form (old-engine safe)
                     return "MK " + base64.b64encode(masks[0]).decode("ascii")
                 rows = " ".join(base64.b64encode(b).decode("ascii") for b in masks)
                 return f"MKN {len(masks)} {rows}"
-        bits = self.mask()
+        try:
+            bits = self.mask()
+        except Exception:
+            self.fail("token-mask computation failed")
         if bits is None:
+            if active:
+                self.fail("missing token mask")
             if not self.armed and self.vocab.cut:
                 return "MF cut=" + ",".join(str(i) for i in self.vocab.cut)
             return "MF"
+        bits = self.checked_mask(bits)
         self.masked += 1
         return "MK " + base64.b64encode(bits).decode("ascii")
 
@@ -272,21 +305,24 @@ class Constraint:
     def feed(self, t: int) -> None:
         """A token the engine emitted (in order)."""
         if self.failed is not None:
-            return
+            self.fail("the grammar state already failed")
+        if not isinstance(t, int) or not 0 <= t < self.vocab.n:
+            self.fail("the engine emitted an invalid token id")
         if not self.armed:
             self.tail = (self.tail + self.vocab.bytes_of(t))[-64:]
             if self.tail.endswith(THINK_END):
                 self.armed = True
             return
-        # --- a tool call: the turn is free from here ---
-        if self.tool_call is not None and t == self.tool_call:
-            self.armed = False                  # a tool call: the turn is free from here (not validated)
-            self.failed = "tool call"           # mask() -> None, reply() -> "MF" for the rest of the turn
-            return
-        if not self.m.consume_token(t):
-            self.failed = self.m.get_error() or f"token {t} is outside the grammar"
-            why = (self.failed.strip().splitlines() or ["?"])[0][:160]
-            note_once(f"constrained decoding: gave the mask up in a turn ({why}); the turn is validated after")
+        try:
+            accepted = self.m.consume_token(t)
+        except Exception:
+            self.fail("the grammar could not consume an emitted token")
+        if not accepted or self.m.is_error():
+            self.fail("the engine emitted a token outside the grammar")
+
+    def complete(self):
+        if not self.active() or not self.masked or not (self.m.is_accepting() or self.m.is_stopped()):
+            self.fail("generation ended before the complete JSON document")
 
     def observe(self, ids) -> None:
         """Tokens the server put into the stream itself (the thinking budget's wrap-up, which ends in </think>)."""
@@ -309,7 +345,12 @@ class Constraint:
         while out < max_new and not cancel.is_set():
             if delay:
                 time.sleep(delay)
-            bits = self.mask()
+            try:
+                bits = self.mask()
+            except Exception:
+                self.fail("token-mask computation failed")
+            if self.armed:
+                bits = self.checked_mask(bits)
             if bits is not None:
                 self.masked += 1
             t = None

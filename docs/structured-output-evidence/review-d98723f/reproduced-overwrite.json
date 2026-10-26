@@ -1,0 +1,103 @@
+{
+  "chat/completions": {
+    "status": 200,
+    "response": {
+      "id": "chatcmpl-c0fe1d87dd844ea2aab0e65a",
+      "object": "chat.completion",
+      "created": 1793036614,
+      "model": "qwen3.8-flash-next",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "{\"n\":1}"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 437,
+        "completion_tokens": 8,
+        "total_tokens": 445,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  },
+  "responses": {
+    "status": 200,
+    "response": {
+      "id": "resp_3014a935dd8b488d9af92abbe70dc36d",
+      "object": "response",
+      "created_at": 1793036614,
+      "status": "completed",
+      "background": false,
+      "error": null,
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": null,
+      "model": "qwen3.8-flash-next",
+      "output": [
+        {
+          "id": "msg_422846eb60b14d9eb71e267f39678a02",
+          "type": "message",
+          "status": "completed",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "{\"n\":1}",
+              "annotations": [],
+              "logprobs": []
+            }
+          ]
+        }
+      ],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "none",
+        "summary": null
+      },
+      "store": false,
+      "temperature": null,
+      "text": {
+        "format": {
+          "type": "json_schema",
+          "name": "review",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "const": 1
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_p": null,
+      "truncation": "disabled",
+      "usage": {
+        "input_tokens": 437,
+        "input_tokens_details": {
+          "cached_tokens": 0
+        },
+        "output_tokens": 8,
+        "output_tokens_details": {
+          "reasoning_tokens": 0
+        },
+        "total_tokens": 445
+      },
+      "user": null,
+      "metadata": {},
+      "completed_at": 1793036614
+    }
+  }
+}

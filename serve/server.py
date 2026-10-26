@@ -80,7 +80,7 @@ from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve import lifeline  # noqa: E402
-from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
+from serve.structured import StructuredOutputError, prepare_format, validated_json, jsonschema_modules, unique_json_object  # noqa: E402
 from serve import constrain  # noqa: E402   (constrained decoding: token masks, optional llguidance)
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
@@ -1399,13 +1399,36 @@ class StrataEngine:
     def _mask_reply(self, c, line="MQ"):
         # "MQ d1 d2 ..." (token_mask=2): the drafts become the multi-row lookahead (serve/constrain.py 1-2);
         # a bare "MQ" is answered as before, so an older engine never sees MKN.
-        drafts = [int(w) for w in line.split()[1:] if w.lstrip("-").isdigit()]
-        line = "MF" if c is None else c.reply(drafts=drafts or None)
+        fields = line.split()
+        if not fields or fields[0] != "MQ" or len(fields) > 8 or any(not w.isdecimal() for w in fields[1:]):
+            raise StructuredOutputError("constrained decoding failed: malformed engine mask query")
+        drafts = [int(w) for w in fields[1:]]
+        if c is not None and any(t >= c.vocab.n for t in drafts):
+            c.fail("invalid draft token in engine mask query")
+        try:
+            line = "MF" if c is None else c.reply(drafts=drafts or None)
+            rows = None
+            if c is not None:
+                fields = line.split()
+                if fields[0] == "MK" and len(fields) == 2:
+                    rows = [c.checked_mask(base64.b64decode(fields[1], validate=True))]
+                elif fields[0] == "MKN" and len(fields) >= 3 and fields[1].isdecimal():
+                    count = int(fields[1])
+                    if count < 1 or count > len(drafts) + 1 or len(fields) != count + 2:
+                        c.fail("incorrect token-mask row count")
+                    rows = [c.checked_mask(base64.b64decode(b, validate=True)) for b in fields[2:]]
+                elif c.armed or not line.startswith("MF cut="):
+                    c.fail("missing token mask or invalid mask reply")
+        except StructuredOutputError:
+            raise
+        except Exception:
+            raise StructuredOutputError("constrained decoding failed: invalid token-mask reply") from None
         try:
             self.proc.stdin.write(line + "\n")
             self.proc.stdin.flush()
-        except OSError:                                  # the pipe is gone: the engine died (not the client)
-            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
+        except OSError:
+            raise StructuredOutputError("constrained decoding failed: could not send the token mask to the engine") from None
+        return rows, len(drafts) + 1
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
         keys = ""
@@ -2211,6 +2234,9 @@ class StrataEngine:
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         bias_api.validate_request(sampling or {}, self, None)
+        c = (sampling or {}).get(constrain.KEY)
+        if c is not None and (not self.supports_mask or embeddings):
+            raise StructuredOutputError("constrained decoding is unavailable for this engine or image request")
         if getattr(self, "batch", 0):
             yield from self.generate_batched(ids, max_new, sampling, cancel, embeddings)
             return
@@ -2219,7 +2245,6 @@ class StrataEngine:
         # an image request takes the same sampling keys as text (#75: it used to decode greedily whatever was asked)
         head = f"GENI {int(max_new)}{self.sampling_keys(sampling or {})} {embeddings}" if embeddings else \
             f"GEN {int(max_new)}{self.sampling_keys(sampling or {})}"
-        c = (sampling or {}).get(constrain.KEY) if self.supports_mask and not embeddings else None
         if c is not None:
             head += " mask=1"                               # the engine asks MQ before every window
         try:
@@ -2228,6 +2253,7 @@ class StrataEngine:
         except OSError:                                  # the pipe is gone: the engine died (not the client)
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
         done = False
+        mask_rows, mask_index, window_left = None, 0, 0
         # #481: how long the engine may stay silent from here.  Until the first line: the request's first prompt
         # chunk at the slowest prompt reading on top of silence_s; a PP line resets it to its own chunk's time.
         silence = float(self.silence_s or 0)
@@ -2267,12 +2293,26 @@ class StrataEngine:
                     raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
                 heard = time.monotonic()                  # any line is output: T, PP, RESUME, INFO ...
                 beat = heard
-                
                 if stall_state:
                     stall_state.clear()
-                    
-                if line.startswith("MQ"):                           # serve/constrain.py: the mask for the next window
-                    self._mask_reply(c, line)
+                if line.startswith("MQ"):
+                    try:
+                        if c is None:
+                            raise StructuredOutputError("unexpected engine token-mask query for an ordinary request")
+                        mask_rows, window_left = self._mask_reply(c, line)
+                    except Exception:
+                        # This MQ has already been removed from the stdout queue. STOP alone
+                        # does not release next_line() on the engine: also answer the query.
+                        # STOP is observed before this free reply can run a generation window.
+                        try:
+                            self.proc.stdin.write("STOP\nMF\n")
+                            self.proc.stdin.flush()
+                        except OSError:
+                            pass
+                        raise
+                    if mask_rows is not None:
+                        window_left = len(mask_rows)
+                    mask_index = 0
                     continue
 
                 if line.startswith("T "):
@@ -2281,7 +2321,16 @@ class StrataEngine:
                         return
                     t = int(line[2:])
                     if c is not None:
+                        if window_left <= 0:
+                            c.fail("the engine emitted tokens without a mask exchange")
+                        if mask_rows is not None and not c.allowed(mask_rows[mask_index], t):
+                            c.fail("the engine did not apply its token mask")
+                        was_armed = c.armed
                         c.feed(t)
+                        window_left -= 1
+                        mask_index += 1
+                        if not was_armed and (c.armed or t in c.vocab.cut):
+                            window_left = 0  # the next token must use a newly computed mask
                     yield t
                 elif line.startswith("PP "):
                     f = line.split()
@@ -2309,6 +2358,8 @@ class StrataEngine:
                     return
                 elif line.startswith("ERR"):
                     done = True
+                    if c is not None:
+                        raise StructuredOutputError("the engine failed during constrained decoding; inspect the engine log")
                     raise ValueError(line[4:].strip())
         finally:
             if not done:                                  # the consumer stopped early: stop the engine, drain to DONE
@@ -3965,6 +4016,7 @@ class Service:
         # same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
         self.prompts = None
+        self._constraint_lock = threading.Lock()
         if hasattr(tokenizer, "encode_marked") and hasattr(tokenizer, "max_special_len"):
             from strata_tokenizer import PromptEncoder
             # one kept prompt per conversation the engine's cache can hold (--conversation-cache-slots); the
@@ -3993,31 +4045,52 @@ class Service:
         return self._force_text(force) if self._force_text is not None else force
 
     def _with_constraint(self, sampling, tools, thinking):
-        """A JSON response format on an engine that takes token masks: the request's sampling with a fresh
-        serve/constrain.Constraint for this pass (the schema, and with tools also a tool call).  Anything else -
-        no format, an older engine, llguidance missing, a schema llguidance cannot compile - leaves it as it was:
-        the prompt directive and the validation after the turn."""
+        """One matcher per generation. A json_schema request may never fall back to prompting."""
         fmt = constrain.format_of(sampling) if isinstance(sampling, dict) else None
         if fmt is None:
             return sampling
+        if tools:
+            raise ValueError("structured output with tools is not supported")
+        required = fmt["type"] == "json_schema"
+        if required and jsonschema_modules() is None:
+            raise StructuredOutputError('json_schema requires jsonschema; install "jsonschema>=4.23,<5"')
         if not getattr(self.engine, "supports_mask", False):
-            constrain.note_once("constrained decoding off: the engine does not take token masks (an engine with "
-                                "token_mask=1 or 2 in its INFO line is needed); JSON is validated after the turn")
+            if required:
+                raise StructuredOutputError("json_schema requires an engine with token_mask=1 or 2 and parallel=1")
             return sampling
         if not constrain.available():
-            constrain.note_once("constrained decoding off: python -m pip install llguidance to turn it on; JSON is "
-                                "validated after the turn")
+            if required:
+                raise StructuredOutputError("json_schema requires llguidance; install llguidance==1.9.1")
             return sampling
+        if self.family == "deepseek41":
+            raise ValueError("constrained decoding is not supported for the deepseek41 family")
         try:
-            vocab = self.__dict__.get("_llg_vocab")
-            if vocab is None:
-                vocab = self.__dict__.setdefault("_llg_vocab", constrain.Vocab(self.tok, self.stop_ids))
+            with self._constraint_lock:
+                source = (id(self.tok), tuple(sorted(self.stop_ids)))
+                if self.__dict__.get("_llg_source") != source or "_llg_vocab" not in self.__dict__:
+                    self._llg_vocab = constrain.Vocab(self.tok, self.stop_ids)
+                    self._llg_source = source
+                vocab = self._llg_vocab
             c = constrain.Constraint(vocab, constrain.grammar(fmt, bool(tools), vocab), armed=not thinking)
-        except Exception as e:                           # noqa: BLE001 - an unsupported schema keyword, a vocab problem
-            constrain.note_once(f"constrained decoding off for a request: {str(e).splitlines()[0][:200]}")
-            return sampling
+        except StructuredOutputError:
+            raise
+        except Exception as e:
+            print(f"[strata] structured output compilation failed ({type(e).__name__})", flush=True)
+            raise ValueError("response_format schema cannot be compiled by llguidance; check the supported schema "
+                             "features and tokenizer configuration") from e
         constrain.note_once("constrained decoding on: JSON answers are masked token by token (llguidance)")
         return {**sampling, constrain.KEY: c}
+
+    def constrained_operational(self):
+        """A loaded mask-capable engine plus a working tokenizer, compiler, masker and independent validator."""
+        if not self.loaded() or not getattr(self.engine, "supports_mask", False) or jsonschema_modules() is None:
+            return False
+        try:
+            probe = self._with_constraint({"response_format": {"type": "json_object"}}, None, False)
+            c = probe.get(constrain.KEY)
+            return c is not None and c.checked_mask(c.mask()) is not None
+        except Exception:
+            return False
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
 
@@ -4766,9 +4839,10 @@ class Service:
         return {
             "service": "strata", "model": self.model,
             "loaded": self.loaded(), "auto_load": hasattr(self.engine, "restart"),
-            "structured_output": {"formats": ["json_object", "json_schema"], "method": "prompt_and_validate",
-                                  "constrained_decoding": bool(getattr(self.engine, "supports_mask", False) and constrain.available()),
-                                  "stream_buffered": True},
+            "structured_output": {"formats": ["json_object", "json_schema"], "method": "constrain_and_validate",
+                                  "constrained_decoding": self.constrained_operational(),
+                                  "stream_buffered": True, "success_headers_after_validation": True,
+                                  "tools_supported": False},
             "engine": (getattr(self.engine, "info", {}) or {}).get("version"),
             "started": int(self.started_at), "uptime_s": int(time.time() - self.started_at),
             "cache_max_tokens": ctx,
@@ -5417,6 +5491,9 @@ class Service:
                             finish = "error"
                             self._say_died(e)
                             raise
+                        except StructuredOutputError:
+                            finish = "error"
+                            raise
                         except QueueWaitExpired:
                             finish = "error"
                             timed_out = True
@@ -5551,6 +5628,13 @@ class Service:
                               f"{run_len} times in a row: ended as \"length\" (repeat_stop_tokens in "
                               "strata-<model>.json; 0 turns this off). If a new request with a short prompt does the "
                               "same, restart the server and report it (#606)", flush=True)
+                    c = (sampling or {}).get(constrain.KEY)
+                    if c is not None and finish == "stop":
+                        try:
+                            c.complete()
+                        except StructuredOutputError:
+                            finish = "error"
+                            raise
                 except GeneratorExit:                   # the client disconnected mid-stream
                     finish = "disconnect"
                     raise
@@ -6015,6 +6099,9 @@ def structured_chunks(chunks, validator):
     heartbeat = time.monotonic()
     try:
         for chunk in chunks:
+            if chunk is not None and any("tool_calls" in (choice.get("delta") or {})
+                                         for choice in chunk.get("choices", ())):
+                raise StructuredOutputError("structured output cannot contain tool-call deltas")
             progress = chunk is not None and "prompt_progress" in chunk
             if chunk is not None and not progress:
                 buffered.append(chunk)      # a progress chunk carries no content: there is nothing in it to validate
@@ -6843,7 +6930,10 @@ def make_handler(svc: Service):
                             if path == "/v1/responses" else {"error": error}
                         self._json(429, body, retry_after=1)
                         return
-                req = json.loads(self._body() or b"{}")
+                # Reject ambiguous inference envelopes before a repeated format selector
+                # or nested schema keyword can silently erase the original constraint.
+                hook = unique_json_object if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses") else None
+                req = json.loads(self._body() or b"{}", object_pairs_hook=hook)
                 if not isinstance(req, dict):
                     raise ValueError("send a JSON object")
                 if path.startswith("/v1/responses/"):        # retrieve/delete/cancel/compact: nothing is stored
@@ -7202,6 +7292,8 @@ def make_handler(svc: Service):
 
         def _openai(self, req):
             req = svc.with_shared(req, "openai")
+            if isinstance(req.get("text"), dict) and "format" in req["text"]:
+                raise ValueError("chat completions requires response_format; text.format is for /v1/responses")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
             require_messages(messages)                # an empty conversation is a 400, as OpenAI answers it, not a reply to nothing
@@ -7210,9 +7302,13 @@ def make_handler(svc: Service):
                 tools = None
             force = svc.force_text(forced_call(req.get("tool_choice"), tools))      # a bad value is a 400 before anything is sent
             messages, validator = prepare_format(req.get("response_format"), messages)
-            if validator is not None and (tools or req.get("strata_mcp")):
+            if validator is not None and (req.get("tools") or tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
+            if validator is not None and images_of(messages):
+                raise ValueError("structured output with images is not supported")
             svc.load()
+            if validator is not None:
+                svc._with_constraint(req, tools, False)  # fail before prompt preparation or HTTP success headers
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
@@ -7241,6 +7337,10 @@ def make_handler(svc: Service):
             chunks = self._capture(chunks, "openai")
             if not req.get("stream"):
                 return self._json(200, openai_collect(chunks))
+            if validator is not None:
+                # HTTP status is immutable after _sse(). Complete validation first, including failures late in decode.
+                buffered = [c for c in chunks if c is not None and "prompt_progress" not in c]
+                chunks = (c for c in buffered)
             self._sse()
             try:
                 for c in chunks:
@@ -7288,8 +7388,10 @@ def make_handler(svc: Service):
             """#451: POST /v1/responses - OpenAI's Responses API, stateless (serve/responses.py), on the chat path.
             Errors use the Responses format; once the stream has started they arrive as a response.failed event."""
             try:
+                if req.get("response_format") is not None:
+                    raise ResponsesError("use text.format on /v1/responses", "response_format")
                 title = (responses_api.thread_title_events(req, svc.model_for(req))
-                         if svc.codex_thread_titles else None)
+                         if svc.codex_thread_titles and constrain.format_of(req) is None else None)
             except ResponsesError as e:
                 return self._json(e.status, e.body())
             if title is not None:
@@ -7314,7 +7416,8 @@ def make_handler(svc: Service):
             def events():
                 yield from asm.start()
                 done = None
-                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+                parser_options = {"declared_only": True} if validator is not None else {}
+                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, **parser_options):
                     if kind == "ping":
                         yield None
                     elif kind == "event":
@@ -7323,6 +7426,8 @@ def make_handler(svc: Service):
                         done = x
                 if done is not None and done["finish"] != "cancel" and not cancel.is_set():
                     yield from asm.finish(done, check)
+                elif validator is not None:
+                    raise StructuredOutputError("structured generation was interrupted before completion")
             items = self._capture(events(), "responses")
             if not req.get("stream"):
                 try:
@@ -7341,6 +7446,16 @@ def make_handler(svc: Service):
                 except ValueError as e:                      # the engine's ERR line
                     return self._json(500, responses_error_body(str(e), "server_error", code="server_error"))
                 return self._json(200, result)
+            if validator is not None:
+                try:
+                    buffered = [e for e in items if e is not None]
+                except StructuredOutputError as e:
+                    return self._json(502, responses_error_body(str(e), "server_error", code="structured_output_failed"))
+                except ValueError as e:
+                    return self._json(500, responses_error_body(str(e), "server_error", code="server_error"))
+                if not buffered or buffered[-1].get("type") != "response.completed":
+                    raise StructuredOutputError("structured generation did not complete")
+                items = (e for e in buffered)
             self._sse()
             last = time.monotonic()
 
@@ -7395,6 +7510,10 @@ def make_handler(svc: Service):
                 raise ResponsesError(str(e), "input") from None
             try:
                 messages, validator = prepare_format(responses_api.text_format(req), messages, with_tools=bool(tools))
+                if validator is not None and (req.get("tools") or tools or skipped or req.get("strata_mcp")):
+                    raise ValueError("structured output with tools/MCP is not supported")
+                if validator is not None and images_of(messages):
+                    raise ValueError("structured output with images is not supported")
             except ValueError as e:
                 raise ResponsesError(str(e).replace("response_format", "text.format"), "text.format") from None
             noted = svc.__dict__.setdefault("hosted_tools_noted", set())   # said once per tool, not per request
@@ -7417,6 +7536,8 @@ def make_handler(svc: Service):
             except ValueError as e:                           # its message starts with the field's name: the param
                 raise ResponsesError(str(e), str(e).partition(":")[0]) from None
             svc.load()
+            if validator is not None:
+                svc._with_constraint(req, tools, False)
             # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
             # starts as the cached one did; the parser and the response keep the request's own tools
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
@@ -7454,6 +7575,8 @@ def make_handler(svc: Service):
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw, store=False))})
 
         def _anthropic(self, req):
+            if constrain.format_of(req) is not None:
+                raise ValueError("structured output is supported on /v1/chat/completions and /v1/responses only")
             svc.load()
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)

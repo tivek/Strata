@@ -165,10 +165,8 @@ public:
     /// serve's constrained decoding (token_mask.hpp): the next run() sets every head logit of row t outside the
     /// mask row t (words + t * n_words, the MKN layout of token_mask.hpp) to kMaskedLogit BEFORE the request's
     /// own sampler runs, so plain sampling, the greedy argmax and the STRATA_SPEC_PROB rejection path all read the
-    /// masked distribution; a pick that still falls outside its row's mask (inverse-CDF rounding) becomes that
-    /// row's masked argmax.  `rows` is how many mask rows `words` holds; run() masks the window's first
-    /// min(rows, T) rows.  The 2-arg form is the old single-row call (rows = 1) - generate.cpp passes the MKN
-    /// row count from Phase 5 on; until then a multi-row window keeps only row 0 constrained.  The engine sets
+    /// masked distribution; a pick outside its row's mask is a fatal error.
+    /// `rows` must cover every row in run()'s window. The engine sets
     /// it before a constrained window and clears it after (null).  `words` must stay alive until then.
     void set_token_mask(const uint32_t* words, int64_t n_words, int rows = 1) {
         tmask_ = words;

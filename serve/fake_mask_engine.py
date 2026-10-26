@@ -24,6 +24,7 @@ def allowed(words: bytes, t: int) -> bool:
 
 def main() -> int:
     mask_ok = "--no-mask" not in sys.argv
+    fault = sys.argv[sys.argv.index("--fault") + 1] if "--fault" in sys.argv else None
     ctx = int(sys.argv[sys.argv.index("--max-context") + 1]) if "--max-context" in sys.argv else 4096
     print(f"INFO context={ctx} kv=fp16{' token_mask=1' if mask_ok else ''} engine=fake", flush=True)
     print(f"READY {ctx} stop", flush=True)
@@ -44,11 +45,16 @@ def main() -> int:
         text = open(path, encoding="utf-8").read() if path else os.environ.get("FAKE_SCRIPT") or ""
         script = list(text.encode()) + [IM_END]
         print(f"REUSED 0", flush=True)
+        if fault == "engine-error":
+            print("ERR injected mask application failure", flush=True)
+            continue
         i, n, finish = 0, 0, "length"
         while n < max_new:
             words = None
-            if masked:
-                print("MQ", flush=True)
+            if masked and fault != "no-query":
+                print("MQ invalid" if fault == "malformed-query" else "MQ", flush=True)
+                if fault == "eof":
+                    return 0
                 rep, stopped = stdin.readline().rstrip("\r\n"), False
                 while rep == "STOP":                  # the engine's reader thread takes STOP aside (stop_req)
                     stopped = True
@@ -57,7 +63,14 @@ def main() -> int:
                     with open(log, "a", encoding="utf-8") as fh:
                         fh.write(rep[:2] + "\n")
                 if rep.startswith("MK "):
-                    words = base64.b64decode(rep[3:])
+                    try:
+                        words = base64.b64decode(rep[3:], validate=True)
+                        if not words or len(words) % 4:
+                            raise ValueError("invalid mask width")
+                    except ValueError:
+                        # Native parsing cancels this request and returns to the command loop.
+                        finish = "cancel"
+                        break
                 elif not rep.startswith("MF"):
                     print(f"ERR expected MK or MF after MQ, got: {rep[:40]}", flush=True)
                     break
@@ -68,7 +81,7 @@ def main() -> int:
             while i < len(script):
                 c = script[i]
                 i += 1
-                if words is None or allowed(words, c):
+                if fault == "ignore-mask" or words is None or allowed(words, c):
                     t = c
                     break
             if t is None:

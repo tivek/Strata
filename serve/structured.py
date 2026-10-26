@@ -1,14 +1,14 @@
-"""JSON response formats at the HTTP boundary: prompt once, validate before delivery.
+"""Independent validation of the complete document before HTTP success.
 
-The native engine has no grammar decoder. Failed generations are errors, never
-silently retried or returned as successful structured output.
-
-`jsonschema` is optional (no new hard dependency of the server): json_object needs only the standard library, and
-json_schema is checked against its schema when the package is installed - without it, only that the answer is one
-JSON object, and the server says so once.
+json_schema requires jsonschema and a constrained decoder (checked by Service).
+json_object requires only the standard library. Neither format extracts or repairs JSON.
 """
 import json
+import ipaddress
+import re
 import threading
+from datetime import date
+from uuid import UUID
 
 
 class StructuredOutputError(RuntimeError):
@@ -16,7 +16,7 @@ class StructuredOutputError(RuntimeError):
 
 
 class _ObjectOnly:
-    """The validator for json_object, and for json_schema without jsonschema: one JSON object."""
+    """The validator for json_object: one complete JSON object."""
 
     def iter_errors(self, value):
         if not isinstance(value, dict):
@@ -33,7 +33,7 @@ _jsonschema_lock = threading.Lock()
 
 
 def jsonschema_modules():
-    """jsonschema, imported on first use; None when it is not installed (said once, in the server window)."""
+    """Import on first use. Missing dependencies are fatal to schema requests, not ordinary inference."""
     global _jsonschema
     with _jsonschema_lock:
         if _jsonschema is None:
@@ -45,10 +45,109 @@ def jsonschema_modules():
                 _jsonschema = (validators, SchemaError, Registry, NoSuchResource)
             except ImportError:
                 _jsonschema = False
-                print('[strata] response_format json_schema: the Python package jsonschema is not installed, so '
-                      'answers are only checked to be one JSON object (python -m pip install "jsonschema>=4.23,<5")',
-                      flush=True)
         return _jsonschema or None
+
+
+# llguidance 1.9.1 targets Draft 2020-12. Its compiler remains the authority for
+# supported intersections, disjoint oneOf branches, regexes and formats. Reject
+# extensions (especially x-guidance.lenient) before the compiler sees them.
+_KEYWORDS = frozenset((
+    "$schema", "$ref", "$defs", "definitions", "type", "const", "enum",
+    "properties", "patternProperties", "additionalProperties", "required", "minProperties", "maxProperties",
+    "items", "prefixItems", "minItems", "maxItems", "minLength", "maxLength", "pattern", "format",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "anyOf", "oneOf", "allOf",
+    "title", "description", "default", "examples", "$comment", "deprecated", "readOnly", "writeOnly",
+))
+
+
+_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_HOSTNAME = re.compile(rf"{_LABEL}(?:\.{_LABEL})*", re.ASCII)
+_ATOM = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+# RFC 5321 dot-string / quoted-string, including quoted-pairSMTP.
+_MAIL_LOCAL = re.compile(rf'(?:{_ATOM}(?:\.{_ATOM})*|"(?:[\x20-\x21\x23-\x5b\x5d-\x7e]|\\[\x20-\x7e])*")', re.ASCII)
+_TIME = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?"
+                   r"(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", re.ASCII)
+
+
+def _hostname(value):
+    if not isinstance(value, str):
+        return True
+    if len(value) > 253 or not _HOSTNAME.fullmatch(value):
+        return False
+    # ASCII A-labels still need IDNA validation; an LDH regex alone accepts
+    # malformed Punycode and forbidden decoded characters/context rules.
+    from idna import ulabel
+    for label in value.split("."):
+        if label.lower().startswith("xn--"):
+            ulabel(label)
+    return True
+
+
+def _email(value):
+    if not isinstance(value, str):
+        return True
+    local, at, domain = value.rpartition("@")
+    if not at or len(value) > 254 or len(local) > 64 or not _MAIL_LOCAL.fullmatch(local):
+        return False
+    if domain.startswith("[") and domain.endswith("]"):
+        address = domain[1:-1]
+        if address.lower().startswith("ipv6:"):
+            return not ipaddress.IPv6Address(address[5:]).scope_id
+        return bool(ipaddress.IPv4Address(address))
+    return bool(domain and not domain.endswith(".") and _hostname(domain))
+
+
+def _uuid(value):
+    return not isinstance(value, str) or str(UUID(value)) == value.lower()
+
+
+def _time(value):
+    # RFC 3339 without leap seconds: fail closed rather than guess leap-second dates.
+    return not isinstance(value, str) or bool(_TIME.fullmatch(value))
+
+
+def _datetime(value):
+    if not isinstance(value, str):
+        return True
+    if len(value) < 11 or value[10] not in "Tt" or not _time(value[11:]):
+        return False
+    return bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value[:10]) and date.fromisoformat(value[:10]))
+
+
+def _format_checker():
+    """An explicit verified set, independent of whichever optional packages happen to be installed."""
+    from jsonschema import FormatChecker
+    # These pinned implementations use datetime.date and ipaddress, including scope rejection.
+    checker = FormatChecker(formats=("date", "ipv4", "ipv6"))
+    for name, check in (("email", _email), ("hostname", _hostname), ("uuid", _uuid),
+                        ("time", _time), ("date-time", _datetime)):
+        checker.checks(name, raises=ValueError)(check)
+    return checker
+
+
+def check_supported_schema(schema):
+    """Visit schema positions only: property names and enum/const data are not keywords."""
+    def visit(node):
+        if isinstance(node, bool):
+            return
+        if not isinstance(node, dict):
+            raise ValueError("response_format schema must contain schema objects or booleans")
+        for key, value in node.items():
+            if key not in _KEYWORDS:
+                raise ValueError(f"unsupported response_format schema keyword: {key}")
+            if key == "$schema" and value.rstrip("#") != "https://json-schema.org/draft/2020-12/schema":
+                raise ValueError("response_format supports only JSON Schema Draft 2020-12")
+            if key == "$ref" and (not isinstance(value, str) or not (value == "#" or value.startswith("#/"))):
+                raise ValueError("response_format supports only local schema references (# or #/...)")
+            if key in ("properties", "patternProperties", "$defs", "definitions"):
+                for child in value.values():
+                    visit(child)
+            elif key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+                for child in value:
+                    visit(child)
+            elif key in ("additionalProperties", "items"):
+                visit(value)
+    visit(schema)
 
 
 def _only_objects(node, root, refs=()):
@@ -104,19 +203,11 @@ def prepare_format(response_format, messages, with_tools=False):
             raise ValueError("response_format schema must accept only JSON objects at its root "
                              "(type object, or anyOf/oneOf of object schemas)")
         modules = jsonschema_modules()
+        if modules is None:
+            raise StructuredOutputError('json_schema requires jsonschema; install "jsonschema>=4.23,<5"')
     else:
         raise ValueError("response_format.type must be text, json_object or json_schema")
 
-    def check_refs(node):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if key in ("$ref", "$dynamicRef") and isinstance(value, str) and not value.startswith("#"):
-                    raise ValueError("response_format supports only local schema references (#...)")
-                check_refs(value)
-        elif isinstance(node, list):
-            for value in node:
-                check_refs(value)
-    check_refs(schema)
     if modules is None:
         validator = _ObjectOnly()
     else:
@@ -126,9 +217,25 @@ def prepare_format(response_format, messages, with_tools=False):
             raise NoSuchResource(ref=uri)
 
         try:
-            cls = validators.validator_for(schema)
+            cls = validators.Draft202012Validator
             cls.check_schema(schema)
-            validator = cls(schema, registry=Registry(retrieve=no_remote))
+            check_supported_schema(schema)
+            checker = _format_checker()
+            # Recognition by jsonschema alone does not establish strict semantics.
+            def check_formats(node):
+                if isinstance(node, dict):
+                    if "format" in node and node["format"] not in checker.checkers:
+                        raise ValueError(f"independent validator does not support format: {node['format']}")
+                    for key in ("properties", "patternProperties", "$defs", "definitions"):
+                        for child in node.get(key, {}).values():
+                            check_formats(child)
+                    for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+                        for child in node.get(key, []):
+                            check_formats(child)
+                    for key in ("additionalProperties", "items"):
+                        check_formats(node.get(key))
+            check_formats(schema)
+            validator = cls(schema, registry=Registry(retrieve=no_remote), format_checker=checker)
         except SchemaError as exc:
             raise ValueError(f"invalid response_format schema: {exc.message}") from exc
     directive = ("OUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching the JSON Schema below. "
@@ -152,60 +259,26 @@ def prepare_format(response_format, messages, with_tools=False):
     return messages, validator
 
 
-def _extract_json(text: str) -> str:
-    s = (text or "").strip()
-    if not s:
-        return ""
-    if s.startswith("```"):
-        first = s.find("\n")
-        if first != -1:
-            end = s.find("```", first + 1)
-            if end != -1:
-                s = s[first + 1:end].strip()
-    start = s.find("{")
-    if start == -1:
-        return s
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == "\"":
-                in_str = False
-        else:
-            if ch == "\"":
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return s[start:i + 1]
-    return s[start:]
+def unique_json_object(items):
+    """json.loads object_pairs_hook: reject ambiguity before any object member is lost."""
+    obj = {}
+    for key, value in items:
+        if key in obj:
+            raise ValueError(f"duplicate JSON key: {key}")
+        obj[key] = value
+    return obj
 
 
 def validated_json(text, validator, finish):
-    def pairs(items):
-        obj = {}
-        for key, value in items:
-            if key in obj:
-                raise ValueError(f"duplicate JSON key: {key}")
-            obj[key] = value
-        return obj
-
     def constant(value):
         raise ValueError(f"invalid JSON constant: {value}")
 
     if finish != "stop":
         raise StructuredOutputError(f"structured output was incomplete (finish_reason={finish}); increase the output budget")
     try:
-        value = json.loads(_extract_json(text), object_pairs_hook=pairs, parse_constant=constant)
+        value = json.loads(text, object_pairs_hook=unique_json_object, parse_constant=constant)
         canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        canonical.encode("utf-8")
     except (ValueError, TypeError) as exc:
         raise StructuredOutputError(f"model did not return valid JSON: {exc}") from exc
     try:

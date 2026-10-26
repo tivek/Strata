@@ -33,7 +33,7 @@ TARGETS = {
     "windows-x86_64": {"platforms": ["win_amd64"], "env": {"sys_platform": "win32", "platform_system": "Windows",
                                                             "os_name": "nt"}},
     "linux-x86_64": {"platforms": ["manylinux2014_x86_64", "manylinux_2_17_x86_64", "manylinux_2_28_x86_64",
-                                   "manylinux_2_34_x86_64", "linux_x86_64"],
+                                   "manylinux_2_31_x86_64", "manylinux_2_34_x86_64", "linux_x86_64"],
                      "env": {"sys_platform": "linux", "platform_system": "Linux", "os_name": "posix"}},
     "darwin-arm64": {"platforms": ["macosx_11_0_arm64", "macosx_12_0_arm64", "macosx_13_0_arm64",
                                    "macosx_14_0_arm64"],
@@ -88,14 +88,29 @@ def _dropped_for_target(target: str) -> set[str]:
 
 
 def build_lock(target: str) -> str:
+    from packaging.requirements import Requirement
     spec = TARGETS[target]
     with tempfile.TemporaryDirectory(prefix="strata-lock-") as tmp:
         cmd = [sys.executable, "-m", "pip", "download", "--quiet", "--only-binary=:all:",
                "--python-version", PYTHON, "--implementation", "cp", "--abi", ABI, "-d", tmp]
         for p in spec["platforms"]:
             cmd += ["--platform", p]
+        # pip evaluates direct markers for the host even with --platform. Resolve
+        # the input for the target first, including Windows-only colorama on Linux.
+        env = {"python_version": PYTHON, "python_full_version": PYTHON + ".15", "implementation_name": "cpython",
+               "platform_python_implementation": "CPython", **spec["env"]}
+        requirements = []
         for name in INPUTS:
-            cmd += ["-r", str(ROOT / name)]
+            for line in (ROOT / name).read_text(encoding="utf-8").splitlines():
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                req = Requirement(line.split(" #")[0])
+                if req.marker is None or req.marker.evaluate(env):
+                    req.marker = None
+                    requirements.append(str(req))
+        inputs = Path(tmp) / "requirements.txt"
+        inputs.write_text("\n".join(requirements) + "\n", encoding="utf-8")
+        cmd += ["-r", str(inputs)]
         subprocess.run(cmd, check=True)
         wheels: dict[str, tuple[str, list[str]]] = {}
         for whl in sorted(Path(tmp).glob("*.whl")):

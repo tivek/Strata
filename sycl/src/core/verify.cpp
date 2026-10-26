@@ -2449,7 +2449,12 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
             return false;
         }
     } // <- head sampling ends here
-    if (tmask_ != nullptr && head_logits_ != nullptr && n_vocab_ > 0) {   // serve's token mask: row 0 (T = 1)
+    if (tmask_ != nullptr && (head_logits_ == nullptr || n_vocab_ <= 0 || T != 1 ||
+                             tmask_words_ != (n_vocab_ + 31) / 32)) {
+        err = "verify: invalid token mask dimensions or unavailable head logits";
+        return false;
+    }
+    if (tmask_ != nullptr) {   // SYCL advertises token_mask=1, one row per exchange
         tmask_row_.resize((size_t) n_vocab_);
         const size_t bytes = (size_t) n_vocab_ * sizeof(float);
         cs_->memcpy(tmask_row_.data(), head_logits_, bytes).wait();
@@ -2465,10 +2470,8 @@ bool Verifier::run(int T, const int32_t *tokens, int64_t pos0, PoolMultiFn pool,
         {   // the sampler's inverse-CDF can fall past the allowed tokens on rounding: never emit a masked one
             volatile int32_t* o = (volatile int32_t*) h_out_;
             if (!mask_allows(tmask_, tmask_words_, o[0])) {
-                const int32_t best = mask_argmax(tmask_row_.data(), n_vocab_, tmask_, tmask_words_);
-                static bool said = false;
-                if (!said) { said = true; std::fprintf(stderr, "strata serve: token mask: the sampler picked %d outside the mask; took %d (the best allowed)\n", (int) o[0], (int) best); }
-                o[0] = best;
+                err = "verify: the sampler selected a token outside its mask";
+                return false;
             }
         }
     }

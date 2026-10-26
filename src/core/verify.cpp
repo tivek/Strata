@@ -3171,7 +3171,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     // and is always rejected; the residual is drawn from the masked distribution).  Host-side for now: D2H the
     // mask's rows, set the outside tokens to kMaskedLogit, H2D them back - the row-0 dance of mask=1 widened.
     // tmask_ holds tmask_rows_ rows of tmask_words_ words (the MKN layout); row t is words + t * n_words.
-    const bool tmask_on = tmask_ != nullptr && head_logits_ != nullptr && n_vocab_ > 0;
+    const bool tmask_on = tmask_ != nullptr;
+    if (tmask_on && (head_logits_ == nullptr || n_vocab_ <= 0 || tmask_rows_ < T ||
+                     tmask_words_ != (n_vocab_ + 31) / 32)) {
+        err = "verify: invalid token mask dimensions or unavailable head logits";
+        return false;
+    }
     const int tmask_rows = tmask_on ? std::min(tmask_rows_ > 0 ? tmask_rows_ : 1, T) : 0;   // 2-arg call: 1 row
     if (tmask_on) {
         const size_t row_bytes = (size_t) n_vocab_ * sizeof(float);
@@ -3229,7 +3234,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (tmask_on) {   // 4-2: the mask's rows read the masked logits above.  A sampled/penalized request was
                       // already picked there; a greedy one (or a window whose head sampling is off) picks here,
                       // with the request's own sampler - the masked argmax for greedy, exact per row.
-        if (!(head_sampling_ && (sampled || hist_d_ != nullptr))) {
+        if (!(head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr))) {
             SamplerParams msp = sampling_;
             msp.counter = (uint64_t) pos0;
             sample_tokens(head_logits_, tmask_rows, (int) n_vocab_, hist_d_, hist_len_, msp, m_out_, cs_);
@@ -3242,11 +3247,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             volatile int32_t* o = (volatile int32_t*) h_out_;
             for (int t = 0; t < tmask_rows; ++t) {
                 if (mask_allows(tmask_ + (int64_t) t * tmask_words_, tmask_words_, o[t])) continue;
-                const int32_t best = mask_argmax(tmask_row_.data() + (size_t) t * n_vocab_, n_vocab_,
-                                                 tmask_ + (int64_t) t * tmask_words_, tmask_words_);
-                static bool said = false;
-                if (!said) { said = true; std::fprintf(stderr, "strata serve: token mask: row %d: the sampler picked %d outside the mask; took %d (the best allowed)\n", t, (int) o[t], (int) best); }
-                o[t] = best;
+                err = "verify: the sampler selected a token outside its mask (row " + std::to_string(t) + ")";
+                return false;
             }
         }
         // 4-3 (the part Phase 4 may only point at): the host rewrites above land in the MAPPED h_out_ before

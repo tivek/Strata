@@ -1,0 +1,68 @@
+name: Structured output invariant
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: structured-output-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install pinned serving dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run parser, validation and fake-engine fault regressions
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          # Missing dependencies must fail this job, not skip the schema tests.
+          import jsonschema
+          import llguidance
+          from serve import constrain
+          assert constrain.available(), "llguidance backend is unavailable"
+
+          with open('structured-output-tests.log', 'w') as log:
+              # Isolate each module's HTTP servers and hardware-sampler threads.
+              failed = False
+              for tests in (
+                  'serve.test_responses_structured',
+                  'serve.test_request_hardening',
+                  'serve.test_constrain', 'serve.test_structured',
+                  'serve.test_structured_hardening',
+                  'serve.test_responses.JsonFormatWithTools',
+                  'serve.test_responses.ToolRoundTrip',
+                  'serve.test_responses.CodexCompactionOverHttp',
+              ):
+                  result = subprocess.run([sys.executable, '-m', 'unittest', '-v', tests],
+                                          stdout=log, stderr=subprocess.STDOUT)
+                  failed |= result.returncode != 0
+          print(Path('structured-output-tests.log').read_text())
+          sys.exit(failed)
+          PY
+      - name: Retain raw regression results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: structured-output-tests-${{ github.sha }}
+          path: structured-output-tests.log
+          if-no-files-found: ignore
+          retention-days: 14

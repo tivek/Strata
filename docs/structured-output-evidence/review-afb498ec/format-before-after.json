@@ -1,0 +1,26 @@
+[
+  {
+    "format": "email",
+    "invalid": "a@",
+    "reviewed": "accepted",
+    "fixed": "rejected"
+  },
+  {
+    "format": "email",
+    "invalid": "a@example com",
+    "reviewed": "accepted",
+    "fixed": "rejected"
+  },
+  {
+    "format": "time",
+    "invalid": "12:34:56",
+    "reviewed": "accepted",
+    "fixed": "rejected"
+  },
+  {
+    "format": "uuid",
+    "invalid": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6---",
+    "reviewed": "accepted",
+    "fixed": "rejected"
+  }
+]

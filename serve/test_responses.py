@@ -11,6 +11,7 @@ import io
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -445,6 +446,9 @@ class OverHttp(Server):
             self.assertNotIn("another origin", json.dumps(r))
 
     def test_json_schema_text_format(self):
+        patch = mock.patch.object(self.svc, "_with_constraint", side_effect=lambda sampling, tools, thinking: sampling)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.engine.scripts = [self.tok.encode("</think>\n\n{\"n\": 3}<|im_end|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]
         fmt = {"type": "json_schema", "name": "num", "strict": True,
@@ -465,8 +469,8 @@ class OverHttp(Server):
         code, r = self.post({"model": "m", "input": "a number", "text": {"format": bad}})
         self.assertEqual((code, r["error"]["code"]), (502, "structured_output_failed"))
         code, events = self.post({"model": "m", "input": "a number", "text": {"format": bad}, "stream": True})
-        self.assertEqual(events[-1]["type"], "response.failed")
-        self.assertEqual(events[-1]["response"]["error"]["code"], "structured_output_failed")
+        self.assertEqual(code, 502)
+        self.assertEqual(events["error"]["code"], "structured_output_failed")
 
     def test_monitor_and_status(self):
         self.svc.api_monitor = True
@@ -624,37 +628,22 @@ class JsonFormatWithTools(Server):
         self.engine.script = self.engine.scripts[0]
 
     def test_a_tool_call_passes_through(self):
-        self.script_with(CALL + "<|im_end|>")
         for stream in (False, True):
             code, r = self.post(self.request(stream=stream))
-            self.assertEqual(code, 200, r)
-            final = r if not stream else r[-1]["response"]
-            self.assertEqual(final["status"], "completed")
-            self.assertEqual([o["type"] for o in final["output"]][-2:], ["message", "function_call"])
-            call, = [o for o in final["output"] if o["type"] == "function_call"]
-            self.assertEqual((call["type"], call["name"], json.loads(call["arguments"])),
-                             ("function_call", "exec_command", {"cmd": "cat a.txt"}))
-        # the model is told the schema is for its final answer, not for a turn that calls a tool
-        self.assertIn("applies only to your final answer", self.tok.decode(self.engine.last_prompt))
+            self.assertEqual(code, 400, r)
+            self.assertIn("tools", r["error"]["message"])
 
     def test_the_final_text_answer_is_the_schema_object(self):
-        self.script_with('</think>\n\n{"outcome": "allow", "rationale": "read only"}<|im_end|>')
-        code, r = self.post(self.request())
-        self.assertEqual(code, 200, r)
-        self.assertEqual(json.loads(r["output"][-1]["content"][0]["text"]),
-                         {"outcome": "allow", "rationale": "read only"})
-        code, events = self.post(self.request(stream=True))
-        self.assertEqual(events[-1]["type"], "response.completed")
-        self.assertEqual(len([e for e in events if e["type"] == "response.output_text.delta"]), 1)
+        for stream in (False, True):
+            code, r = self.post(self.request(stream=stream))
+            self.assertEqual(code, 400, r)
+            self.assertIn("tools", r["error"]["message"])
 
     def test_a_text_answer_that_breaks_the_schema_fails_as_without_tools(self):
-        try:
-            import jsonschema  # noqa: F401
-        except ImportError:
-            self.skipTest("the schema check needs jsonschema")
-        self.script_with('</think>\n\n{"outcome": 3}<|im_end|>')
-        code, r = self.post(self.request())
-        self.assertEqual((code, r["error"]["code"]), (502, "structured_output_failed"))
+        for stream in (False, True):
+            code, r = self.post(self.request(stream=stream))
+            self.assertEqual(code, 400, r)
+            self.assertIn("tools", r["error"]["message"])
 
 
 class ThreadTitle(Server):

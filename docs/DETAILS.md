@@ -484,28 +484,18 @@ applies at the next start. Network, key, MCP and program keys are not editable t
 - A tool call counts only when it names a tool the request declared. Any other call, or any call in a request that declared
   no tools, comes back as the text it was written as. A call whose envelope drifted by a token (`<=NAME>`, `<function:NAME>`
   or `<NAME>` instead of `<function=NAME>`) is read as the call when NAME is a declared tool.
-- JSON output: `response_format: {"type":"json_object"}` or `{"type":"json_schema", ...}` on `/v1/chat/completions`. The schema
-  must accept only JSON objects at its root (`"type":"object"`, or `anyOf`/`oneOf` of object schemas). Local `#` references
-  work and remote ones are refused. This is schema prompting followed by server validation, not grammar-constrained
-  decoding, with one generation per request. `jsonschema` is used when installed (`python -m pip install "jsonschema>=4.23,<5"`);
-  without it the answer is only checked to be one JSON object. Malformed output returns **502** with
-  `error.code: structured_output_failed`, an invalid schema **400**. JSON formats combined with tools or MCP are refused.
-  Streaming buffers the answer and emits content only after validation.
-This is **schema prompting followed by server validation** on the ordinary path. When the engine takes token masks
-(its INFO line says `token_mask=1`) and the Python package `llguidance` is installed (setup adds it), the chat
-route's JSON formats are also **grammar-constrained**: before every generation window the engine asks the server
-(MQ) and the server answers with the tokens the grammar allows (MK) or free sampling (MF), so every emitted token
-advances the schema; a turn that opens a tool call leaves the grammar. Without the engine support or the package
-the server says so once and validation after the turn is all there is. Either way one generation is made per
-request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON,
-duplicate keys, non-finite numbers, schema violations and incomplete generations return **502** with
-`error.code: structured_output_failed`; invalid request schemas return **400**. JSON formats combined with
-tools/MCP are refused explicitly. Without `response_format`, ordinary text and tool behavior stays the same.
-
-Structured SSE buffers the answer while sending keep-alive comments. It emits content only after validation,
-then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without invalid content deltas.
-`/v1/status.structured_output` advertises the formats, validation method and buffered streaming behavior; its
-`constrained_decoding` says whether the token masks are live for this server.
+- JSON output: `response_format: {"type":"json_object"}` or `{"type":"json_schema", ...}` on
+  `/v1/chat/completions`; use `text.format` on `/v1/responses`. Schema requests require `llguidance`,
+  `jsonschema`, and a loaded engine advertising `token_mask=1` or `2`, without batch slots. Missing support,
+  compilation failures and mask failures end the request; there is no prompt-only schema fallback.
+  Every completed answer is parsed and independently validated before success. Malformed JSON, duplicate keys,
+  non-finite values, schema violations and incomplete generations return **502**; invalid or unsupported schemas
+  return **400**. Prose and code fences around JSON are rejected.
+  Structured SSE sends HTTP success headers and content only after validation, so a generation failure can return
+  a non-2xx status. This delays the first SSE event and provides no keep-alives during structured generation.
+  Tools, MCP and images with structured output are refused explicitly on both routes.
+  `/v1/status.structured_output.constrained_decoding` checks the loaded engine, tokenizer, compiler, masker and
+  validator. See [structured output](STRUCTURED_OUTPUT.md) for schema support, protocol details and validation.
 
 - `logit_bias` and token/bias pair lists work on CUDA and HIP engines without continuous batching ([LOGIT_BIAS.md](LOGIT_BIAS.md)).
 - Stop strings (`stop`, `stop_sequences`), `temperature`, `top_p`, `top_k`, `min_p` and `seed` are honored per request.
@@ -718,7 +708,7 @@ endpoints are refused with an error that says so.
 | `tool_choice` | `"none"` hides the tools; anything else lets the model choose (it cannot be forced) |
 | `reasoning.effort` | `none`/`minimal`, `low`, `medium`, `high`/`xhigh`; without it the config's `reasoning_effort`, else the model's default |
 | `max_output_tokens` | The output cap, thinking included. Running out ends the response `incomplete` |
-| `text.format` | `json_schema` and `json_object` use the JSON formats above (checked, not constrained) |
+| `text.format` | `json_schema` and `json_object` use the JSON formats above (masked when supported, independently checked) |
 | `client_metadata["x-codex-turn-metadata"]` thread-title request | Opt-in `"codex_thread_titles": true`: answered without the engine as `{"title": "<the user's line, cut to 36 characters>"}` so the conversation keeps the prompt cache |
 
 The thinking comes back as a `reasoning` output item with `reasoning_text` content. The model writes no summaries, so `summary` is

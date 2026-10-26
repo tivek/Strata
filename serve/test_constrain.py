@@ -58,10 +58,10 @@ class Masks(unittest.TestCase):
                 self.assertEqual(json.loads(text), want)
                 self.assertIsNone(c.failed)
 
-    def test_tool_call_only_with_tools(self):
-        call = CALL[CALL.index("<tool_call>"):]
-        self.assertEqual(self.replay(call, tools=True)[1], call)
-        self.assertNotIn("<tool_call>", self.replay(call, tools=False)[1])
+    def test_tool_call_schema_combination_is_explicitly_rejected(self):
+        with self.assertRaisesRegex(ValueError, "tools"):
+            self.replay(CALL, tools=True)
+        self.assertNotIn("<tool_call>", self.replay(CALL, tools=False)[1])
 
     def test_thinking_is_free_and_the_window_is_cut_at_its_end(self):
         c, text = self.replay('plan {x}</think>\n\n{"n": 5}', armed=False)
@@ -145,22 +145,20 @@ class Masks(unittest.TestCase):
         self.assertEqual(len(base64.b64decode(reply[3:])), len(c.m.compute_bitmask()))
         self.assertIsNone(c.failed)
 
-    def test_8_after_giving_the_mask_up_a_draft_window_is_MF(self):
+    def test_8_failed_state_cannot_answer_a_draft_window_with_MF(self):
         c = C.Constraint(self.vocab, C.grammar(FMT, False, self.vocab), armed=True)
-        c.feed(ord("x"))                                     # outside the mask -> failed ("give up")
+        with self.assertRaises(C.StructuredOutputError):
+            c.feed(ord("x"))
         self.assertIsNotNone(c.failed)
-        self.assertEqual(c.reply(self.db('{"n": 3}')), "MF") # even with drafts: no MK, no MKN
-        c2 = C.Constraint(self.vocab, C.grammar(FMT, True, self.vocab), armed=True)
-        if c2.tool_call is not None:                         # only when the tokenizer has one token for the tag
-            c2.feed(c2.tool_call)                            # a tool call also gives the mask up
-            self.assertIsNotNone(c2.failed)
-            self.assertEqual(c2.reply(self.db("cat")), "MF")
+        with self.assertRaises(C.StructuredOutputError):
+            c.reply(self.db('{"n": 3}'))
 
-    def test_a_token_outside_the_mask_gives_the_mask_up(self):
+    def test_a_token_outside_the_mask_is_fatal(self):
         c = C.Constraint(self.vocab, C.grammar(FMT, False, self.vocab), armed=True)
-        c.feed(ord("x"))                                     # an engine that ignored the mask
-        self.assertIsNotNone(c.failed)
-        self.assertEqual(c.reply(), "MF")
+        with self.assertRaises(C.StructuredOutputError):
+            c.feed(ord("x"))
+        with self.assertRaises(C.StructuredOutputError):
+            c.reply()
 
     def test_formats(self):
         self.assertIsNone(C.format_of({}))
@@ -174,6 +172,9 @@ class Http(unittest.TestCase):
     tok = ByteTokenizer()
 
     def start(self, engine):
+        if hasattr(self, "httpd"):
+            self.httpd.shutdown()
+            self.httpd.server_close()
         self.engine = engine
         self.svc = Service(engine, self.tok, TEMPLATE)
         self.httpd = serve(self.svc, port=0)
@@ -228,39 +229,19 @@ class MockUnderMask(Http):
         self.assertEqual(json.loads(msg["content"]), {"n": 1})
 
     def test_responses_tool_turn_then_masked_answer(self):
-        end = self.tok.encode("<|im_end|>", parse_special=True)
-        self.engine.scripts = [self.tok.encode(CALL, parse_special=True) + end,
-                               self.tok.encode('Read it.\n</think>\n\nHere: {"n": "3"}', parse_special=True) + end]
-        self.engine.script, self.engine.turns = self.engine.scripts[0], 0
-        user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "count"}]}
-        body = {"model": "m", "input": [user], "tools": TOOLS, "text": {"format": TEXT_FMT}, "store": False}
-        code, r = self.post("/v1/responses", body)
-        self.assertEqual(code, 200, r)
-        fc = [o for o in r["output"] if o["type"] == "function_call"]
-        self.assertEqual(len(fc), 1)
-        code, r = self.post("/v1/responses", {**body, "input": [user, *r["output"], {
-            "type": "function_call_output", "call_id": fc[0]["call_id"], "output": "3 lines"}]})
-        self.assertEqual(code, 200, r)
-        self.assertEqual(r["output"][-1]["content"][0]["text"], '{"n":3}')
+        body = {"input": "count", "tools": TOOLS, "text": {"format": TEXT_FMT}}
+        for stream in (False, True):
+            code, r = self.post("/v1/responses", {**body, "stream": stream})
+            self.assertEqual(code, 400, r)
+            self.assertIn("tools", r["error"]["message"])
 
     # --- the same tool turn, but the answer comes out through the MTP window (MockUnderMask 拡張, 6b-1) ---
     def test_9_multi_row_tool_turn_then_masked_answer(self):
-        engine = MTPWindowMock(self.tok, [CALL, 'Read it.\n</think>\n\nHere: {"n": "3"}'], max_context=16384)
-        engine.supports_mask = True
-        self.start(engine)
-        user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "count"}]}
-        body = {"model": "m", "input": [user], "tools": TOOLS, "text": {"format": TEXT_FMT}, "store": False}
-        code, r = self.post("/v1/responses", body)
-        self.assertEqual(code, 200, r)
-        fc = [o for o in r["output"] if o["type"] == "function_call"]
-        self.assertEqual(len(fc), 1)
-        code, r = self.post("/v1/responses", {**body, "input": [user, *r["output"], {
-            "type": "function_call_output", "call_id": fc[0]["call_id"], "output": "3 lines"}]})
-        self.assertEqual(code, 200, r)
-        self.assertEqual(r["output"][-1]["content"][0]["text"], '{"n":3}')
-        self.assertTrue(any(rep.startswith("MKN") for rep in engine.mask_log), engine.mask_log[:4])
-        obj, _ = engine.answer_json(self.tok)
-        self.assertEqual(obj, {"n": 3})
+        body = {"input": "count", "tools": TOOLS, "text": {"format": TEXT_FMT}}
+        for stream in (False, True):
+            code, r = self.post("/v1/responses", {**body, "stream": stream})
+            self.assertEqual(code, 400, r)
+            self.assertIn("tools", r["error"]["message"])
 
     # --- 6b-2: 採用→feed の順序 — the server's state always matches the tokens that actually came out ---
     def test_10_the_servers_state_matches_the_emitted_tokens(self):

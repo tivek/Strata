@@ -33,18 +33,20 @@ inline bool mask_b64_words(const char* s, std::vector<uint32_t>& out) {
         return -1;
     };
     std::vector<uint8_t> bytes;
-    uint32_t acc = 0;
-    int bits = 0;
-    for (const char* p = s; *p != '\0' && *p != ' ' && *p != '\r' && *p != '\n'; ++p) {
-        if (*p == '=') break;
-        const int v = val(*p);
-        if (v < 0) return false;
-        acc = (acc << 6) | (uint32_t) v;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            bytes.push_back((uint8_t) ((acc >> bits) & 0xFFu));
-        }
+    const char* end = s;
+    while (*end && *end != ' ' && *end != '\r' && *end != '\n') ++end;
+    const size_t len = (size_t) (end - s);
+    if (len == 0 || len % 4 != 0) return false;
+    for (size_t i = 0; i < len; i += 4) {
+        const int a = val(s[i]), b = val(s[i + 1]);
+        const bool pad2 = s[i + 2] == '=', pad3 = s[i + 3] == '=';
+        const int c = pad2 ? 0 : val(s[i + 2]), d = pad3 ? 0 : val(s[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 || (pad2 && !pad3)) return false;
+        if ((pad2 || pad3) && i + 4 != len) return false;
+        if ((pad2 && (b & 15)) || (pad3 && !pad2 && (c & 3))) return false;
+        bytes.push_back((uint8_t) ((a << 2) | (b >> 4)));
+        if (!pad2) bytes.push_back((uint8_t) ((b << 4) | (c >> 2)));
+        if (!pad3) bytes.push_back((uint8_t) ((c << 6) | d));
     }
     if (bytes.size() % 4 != 0) return false;
     out.assign(bytes.size() / 4, 0u);
@@ -91,6 +93,7 @@ inline bool mask_parse_reply_rows(const std::string& line, bool& masked, int& ro
         return true;
     }
     if (line.rfind("MK ", 0) == 0) {
+        if (line.find_first_of(" \t\r\n", 3) != std::string::npos) { err = "extra data after MK"; return false; }
         if (!mask_b64_words(line.c_str() + 3, words) || words.empty()) { err = "a bad MK mask"; return false; }
         masked = true;
         rows = 1;
@@ -102,11 +105,14 @@ inline bool mask_parse_reply_rows(const std::string& line, bool& masked, int& ro
         while (*p != '\0') {
             char* e = nullptr;
             const long v = std::strtol(p, &e, 10);
-            if (e == p || v < 0) { err = "a bad MF cut list"; return false; }
+            if (e == p || v < 0 || v > INT32_MAX || (*e == ',' && e[1] == '\0')) {
+                err = "a bad MF cut list"; return false;
+            }
             cut.push_back((int32_t) v);
             p = *e == ',' ? e + 1 : e;
             if (*e != ',' && *e != '\0') { err = "a bad MF cut list"; return false; }
         }
+        if (cut.empty()) { err = "an empty MF cut list"; return false; }
         return true;
     }
     err = "expected MK, MKN or MF after MQ, got: " + line.substr(0, 40);

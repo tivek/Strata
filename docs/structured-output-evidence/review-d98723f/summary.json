@@ -1,0 +1,22 @@
+{
+  "reviewed_commit": "d98723f7eb897884eb282a2440a4ad882ce3333c",
+  "python": "3.12.3",
+  "selected_tests": 118,
+  "server_tests": 352,
+  "gpu_tests": "historical, not rerun for this parser-only change",
+  "source_sha256": {
+    "serve/server.py": "486ae80f23edc10b4726adf09e4da727b37078a98bc01abe9ac3f99244bb0e4e",
+    "serve/structured.py": "71933486272c17d765489b9da6097721e1d314476059d996d174129327ee67d8",
+    "serve/test_request_hardening.py": "ae5462f304cd340be8f40680f6dfb8b2f11c1f0ed752d7641f32fadd9a31d861",
+    ".github/workflows/structured-output.yml": "3e32765ab13a0cf353288bb648339726d21c7a3e13404032aba2014cb4b3b557"
+  },
+  "evidence_sha256": {
+    "before-fix.log.gz": "3b4e31b21308a79b86e9a43ff6b69b81492c60e24634f3761d1cb41edf8a5e2b",
+    "server-compatibility.log.gz": "04fb0af7059f0f03fcaa4fd9f26402bf79311abe3394c3f131be27cfd93da8c3",
+    "README.md": "0dbafaa0a917348191e57ec9950fb01aa387fa7396c25486cfbc0c15aa87420b",
+    "request-hardening.log.gz": "39a4e4f25c10a086aa05a673cbf616a3e6378b8d2ec75d558836f7de7c6bbb8a",
+    "reproduced-overwrite.json": "825eb68f1e2270d59df048a09d0d681889042903440488fc177670dd1aa45fc7",
+    "ci-local.log.gz": "10775b6562a66952ec8d72fe3edfcee57c8f128817fb469a206c951b59327b40",
+    "reproduction.log.gz": "5bacfb2580da620863a8c1dc6181dda311a86c26aec56a7bdb1ce964e458006f"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "revision": "89e83a74014617ffbe79a56d83d14d054cd11417",
+  "formats": {
+    "date": {
+      "cases": 81,
+      "mismatches": []
+    },
+    "ipv4": {
+      "cases": 41,
+      "mismatches": []
+    },
+    "ipv6": {
+      "cases": 51,
+      "mismatches": []
+    },
+    "email": {
+      "cases": 71,
+      "mismatches": []
+    },
+    "hostname": {
+      "cases": 66,
+      "mismatches": []
+    },
+    "uuid": {
+      "cases": 29,
+      "mismatches": []
+    },
+    "time": {
+      "cases": 56,
+      "mismatches": [
+        {
+          "value": "23:59:60Z",
+          "expected": true,
+          "actual": false,
+          "description": "a valid time string with leap second, Zulu"
+        },
+        {
+          "value": "23:59:60+00:00",
+          "expected": true,
+          "actual": false,
+          "description": "valid leap second, zero time-offset"
+        },
+        {
+          "value": "01:29:60+01:30",
+          "expected": true,
+          "actual": false,
+          "description": "valid leap second, positive time-offset"
+        },
+        {
+          "value": "23:29:60+23:30",
+          "expected": true,
+          "actual": false,
+          "description": "valid leap second, large positive time-offset"
+        },
+        {
+          "value": "15:59:60-08:00",
+          "expected": true,
+          "actual": false,
+          "description": "valid leap second, negative time-offset"
+        },
+        {
+          "value": "00:29:60-23:30",
+          "expected": true,
+          "actual": false,
+          "description": "valid leap second, large negative time-offset"
+        }
+      ]
+    },
+    "date-time": {
+      "cases": 47,
+      "mismatches": [
+        {
+          "value": "1998-12-31T23:59:60Z",
+          "expected": true,
+          "actual": false,
+          "description": "a valid date-time with a leap second, UTC"
+        },
+        {
+          "value": "1998-12-31T15:59:60.123-08:00",
+          "expected": true,
+          "actual": false,
+          "description": "a valid date-time with a leap second, with minus offset"
+        }
+      ]
+    }
+  },
+  "runtime_idna": "3.20"
+}

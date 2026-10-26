@@ -1,0 +1,133 @@
+{
+  "reviewed_commit": "64fa76b3c60a36f2bcc75bd5f2b7a204e2b10c7c",
+  "python": "3.12.3",
+  "platform": "Linux-6.8.0-106-generic-x86_64-with-glibc2.39",
+  "dependencies": {
+    "jsonschema": "4.26.0",
+    "llguidance": "1.9.1",
+    "idna": "3.20"
+  },
+  "source_sha256": {
+    "serve/server.py": "5a83c8fe48e69c88085bfa23b0d6d5069cb8cd9f7b977f3a4047d51f3e3e17d2",
+    "serve/structured.py": "71933486272c17d765489b9da6097721e1d314476059d996d174129327ee67d8",
+    "serve/constrain.py": "d7f27198b5a92c72774e98c49f8991df629a9e0ab80a43007ba13d61bf56a3a8",
+    "serve/responses.py": "343f0805ab4f789d290f9ee4cff5c74c345bd19ebacc38ba44076d1402afbf46",
+    "serve/test_structured_hardening.py": "aa6d5995ffe844de9844a460c12c40d52e0ad51feede0dde169128d2d5c8d6cb",
+    "serve/test_structured.py": "248be017a2b004082bdb1c6abd3b64fc51053d71c7ab0a27945331a0d0207bef",
+    "tools/strata_tokenizer.py": "6db1ea62d3edbaa64dce139088146ccf370933998d5f997cd5f41a39300075a6",
+    "tools/check_structured_output.py": "c95746d305b89ec2164cc20be61d1b6c1ff3b628518bcc1d643cc7e1ed67ee53",
+    "tools/check_structured_recovery.py": "3ef5d348f927d986499d57fd6651c78c87509a9021f988a01152f21d2c6e7bcc"
+  },
+  "runs": {
+    "single": {
+      "pid": 699279,
+      "configured_gpus": [
+        0
+      ],
+      "stages": [],
+      "recovery_pairs": 12,
+      "acceptance_checks": 28,
+      "fixed_fixture_successes": 128,
+      "fixed_fixture_errors": 0,
+      "generated_schemas": 64,
+      "distinct_structures": 62,
+      "generated_requests": 256,
+      "generated_successes": 256,
+      "generated_errors": 0,
+      "generated_features": {
+        "arrays": 37,
+        "constraint_combinations": 53,
+        "disjoint_unions": 27,
+        "nested_objects": 27,
+        "nested_references": 47,
+        "numeric_boundaries": 58,
+        "unusual_strings": 36
+      },
+      "unicode_separator_streams": 64,
+      "values_different_from_witness": 228,
+      "seed": 3800
+    },
+    "dual": {
+      "pid": 714422,
+      "configured_gpus": [
+        0,
+        1
+      ],
+      "stages": [
+        {
+          "stage": 0,
+          "layer_start": 0,
+          "layer_end": 23,
+          "engine_ordinal": 0
+        },
+        {
+          "stage": 1,
+          "layer_start": 24,
+          "layer_end": 47,
+          "engine_ordinal": 1
+        }
+      ],
+      "recovery_pairs": 12,
+      "acceptance_checks": 28,
+      "fixed_fixture_successes": 128,
+      "fixed_fixture_errors": 0,
+      "generated_schemas": 64,
+      "distinct_structures": 62,
+      "generated_requests": 256,
+      "generated_successes": 256,
+      "generated_errors": 0,
+      "generated_features": {
+        "arrays": 37,
+        "constraint_combinations": 53,
+        "disjoint_unions": 27,
+        "nested_objects": 27,
+        "nested_references": 47,
+        "numeric_boundaries": 58,
+        "unusual_strings": 36
+      },
+      "unicode_separator_streams": 62,
+      "values_different_from_witness": 230,
+      "seed": 3800
+    }
+  },
+  "selected_tests": 125,
+  "native_build": {
+    "source": "local",
+    "version": "0.1.51",
+    "archs": [
+      89
+    ],
+    "vision": "none",
+    "cuda_dirs": [
+      "/usr/local/cuda-13.1/bin",
+      "/usr/local/cuda-13.1/lib64"
+    ],
+    "src": "af8f67533b576bf2",
+    "vision_src": null
+  },
+  "native_binary_sha256": "7bb03ccfb509d57cb4d4a61b0fb48624b26297f479298ec073c42fed2263174a",
+  "generated_successes_total": 512,
+  "fixed_fixture_successes_total": 256,
+  "evidence_sha256": {
+    "single-engine.log.gz": "af8e2ff1a72c55f32baef1eb6358b23361703ab26b21244ddad6e68022fc3953",
+    "dual-recovery.json.gz": "7bbeca54dea3e928339a258df88e923f5eb8ece357bf43ee0fc9649bfdece834",
+    "single-server.log.gz": "fdb2a16450817f700fbfd3eb1d3eac8c9196e6fe18a45bb6262f8eb9f0350055",
+    "single-http.log.gz": "0e7ad49d667a67ac9f471904a001e1b2cf47cb10c3dbcf8feb811200e8144381",
+    "dual-engine.log.gz": "3a4ada17240795b475062b6b6d0905e4e1ddeb47086fcc2c25b772ce70d8a1f7",
+    "cpu-tests.log.gz": "80fbeddaa534935ea67bd30424ac204786cbc20fe518ba1f6bd5f449dfac4169",
+    "dual-server.log.gz": "bc92064e0392dccab0134c5c975237b745b027128bee7bef5fb06b112a5bf47e",
+    "dual-http.log.gz": "111a6571140c089b1bc29faea807d6960d92309f3690fd2d093e80127b3ee6ab",
+    "dual-http.json.gz": "bba4017c9afd1fdceb7c88d5659ebd1f251b867108a48c35516ff5e759d6aced",
+    "tool-events-before.log.gz": "4edff85c482e608ce14575063998689f6dc64395f4e89cf79bb6671adf804b36",
+    "generator-admission.log.gz": "4bcdb0bbdd00d7a8e2b8e648eb5c2c9982a709cdf99e43d64fd450f2193e083a",
+    "single-http.json.gz": "8a3e80e2b4c0d101f2b98c839b8e8839161d9c7215e5b324117b48fdc6dfb841",
+    "tool-events-after.log.gz": "c91609064f81bb1c141e94fd5bec6e076ef993872bbcc8494713a10ffecfa55d",
+    "single-recovery.json.gz": "ead5252ec8464b81e4b88c692bdcab167c95a91e61b8e115ed95ce35be426752",
+    "generator-tests.log.gz": "58e3f501e620994681e2362834ed450f57d97f590ca26cb724c3eedbfb8984a7",
+    "sse-client-before.log.gz": "a1334730307347775acb8f23591801c3e32547d65d9fd87f4a7cf4a26b87ed71",
+    "README.md": "33004707e8950e92a2f9efd5af6c5da669293436d9dcc1a112deb93158c1bc16"
+  },
+  "generation_http_requests_per_configuration": 436,
+  "capability_probes_per_configuration": 1,
+  "distinct_generated_schemas": 64
+}

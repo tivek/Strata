@@ -57,6 +57,155 @@ class Hardening(unittest.TestCase):
             code, out = self.post("/v1/chat/completions", b"{nope")
         self.assertEqual(code, 400, out)
 
+    def test_chat_rejects_text_format_independently_of_response_format(self):
+        schema = {"type": "object", "properties": {"n": {"const": 7}}, "required": ["n"]}
+        correct = {"type": "json_schema", "json_schema": {"name": "result", "schema": schema}}
+        selectors = ({}, {"response_format": None}, {"response_format": {"type": "text"}},
+                     {"response_format": {"type": "json_object"}}, {"response_format": correct})
+        misplaced = ({"type": "json_schema", "name": "result", "schema": schema},
+                     {"type": "json_object"}, {"type": "text"}, None, {})
+        with mock.patch.object(self.svc, "load", wraps=self.svc.load) as load, \
+                mock.patch.object(self.svc, "prepare", wraps=self.svc.prepare) as prepare:
+            for selector in selectors:
+                for foreign in misplaced:
+                    for stream in (False, True):
+                        request = {"messages": [{"role": "user", "content": "Return the result"}],
+                                   "reasoning_effort": "none", **selector,
+                                   "text": {"format": foreign}, "stream": stream}
+                        with self.subTest(selector=selector, misplaced=foreign, stream=stream):
+                            code, out = self.post("/v1/chat/completions", request)
+                            self.assertEqual(code, 400, out)
+                            self.assertEqual(out["error"]["type"], "invalid_request_error")
+                            self.assertIn("text.format is for /v1/responses", out["error"]["message"])
+            load.assert_not_called()
+            prepare.assert_not_called()
+
+    def test_api_specific_format_selectors_still_succeed(self):
+        schema = {"type": "object", "properties": {"n": {"const": 7}}, "required": ["n"]}
+        with mock.patch.object(self.svc.engine, "supports_mask", True, create=True), \
+                mock.patch.object(self.svc.engine, "script", self.svc.tok.encode('{"n":7}') + [257]):
+            for kind in ("json_object", "json_schema"):
+                chat_format = ({"type": kind} if kind == "json_object" else
+                               {"type": kind, "json_schema": {"name": "result", "schema": schema}})
+                responses_format = ({"type": kind} if kind == "json_object" else
+                                    {"type": kind, "name": "result", "schema": schema})
+                chat = {"messages": [{"role": "user", "content": "Return JSON."}],
+                        "reasoning_effort": "none", "response_format": chat_format}
+                response = {"input": "Return JSON.", "reasoning": {"effort": "none"},
+                            "text": {"format": responses_format}}
+                with self.subTest(kind=kind):
+                    code, out = self.post("/v1/chat/completions", chat)
+                    self.assertEqual(code, 200, out)
+                    self.assertEqual(json.loads(out["choices"][0]["message"]["content"]), {"n": 7})
+                    code, out = self.post("/v1/responses", response)
+                    self.assertEqual(code, 200, out)
+                    self.assertEqual(json.loads(out["output"][-1]["content"][0]["text"]), {"n": 7})
+
+    def test_chat_plain_text_and_nested_format_data_still_succeed(self):
+        for selector in ({}, {"response_format": {"type": "text"}}):
+            for text in ({}, {"verbosity": "low"}):
+                request = {"messages": [{"role": "user", "content": 'The string "text.format" is data.'}],
+                           "reasoning_effort": "none", "max_tokens": 32, **selector, "text": text,
+                           "metadata": {"text": {"format": {"type": "json_schema"}}}}
+                with self.subTest(selector=selector, text=text):
+                    code, out = self.post("/v1/chat/completions", request)
+                    self.assertEqual(code, 200, out)
+                    self.assertTrue(out["choices"][0]["message"]["content"])
+
+    def test_duplicate_schema_keys_are_rejected_before_preparation(self):
+        schemas = [
+            # The reviewer's example, including the constraint lost by last-value-wins parsing.
+            '{"type":"object","properties":{"n":{"const":9}},"properties":{"n":{"const":1}},"required":["n"]}',
+            '{"type":"object","properties":{"n":{"const":9,"const":1}},"required":["n"]}',
+            '{"type":"object","properties":{"n":{"const":9},"n":{"const":1}},"required":["n"]}',
+            '{"type":"object","$defs":{"value":{"const":9,"const":1}},"properties":{"n":{"$ref":"#/$defs/value"}}}',
+            '{"type":"object","properties":{"ns":{"type":"array","items":{"minimum":9,"minimum":1}}}}',
+            r'{"type":"object","properties":{"n":{"const":9}},"pro\u0070erties":{"n":{"const":1}}}',
+            '{"type":"object","const":{"n":9,"n":1}}',
+            '{"type":"object","properties":{"n":{"const":1,"const":1}}}',
+        ]
+        with mock.patch.object(self.svc, "prepare", wraps=self.svc.prepare) as prepare, \
+                mock.patch.object(self.svc, "load", wraps=self.svc.load) as load:
+            for api in ("chat/completions", "responses"):
+                for stream in (False, True):
+                    for schema in schemas:
+                        body = ({"messages": [{"role": "user", "content": "Return JSON."}],
+                                 "reasoning_effort": "none", "response_format": {"type": "json_schema", "json_schema": {
+                                     "name": "review", "schema": "__SCHEMA__"}}} if api == "chat/completions" else
+                                {"input": "Return JSON.", "reasoning": {"effort": "none"}, "text": {"format": {
+                                    "type": "json_schema", "name": "review", "schema": "__SCHEMA__"}}})
+                        # Send raw bytes: a Python dict would discard the duplicate before HTTP.
+                        raw = json.dumps({**body, "stream": stream}).replace('"__SCHEMA__"', schema).encode()
+                        with self.subTest(api=api, stream=stream, schema=schema):
+                            code, out = self.post("/v1/" + api, raw)
+                            self.assertEqual(code, 400, out)
+                            self.assertIn("duplicate JSON key", out["error"]["message"])
+                            self.assertEqual(out["error"]["type"], "invalid_request_error")
+            prepare.assert_not_called()
+            load.assert_not_called()
+
+    def test_duplicate_format_selectors_cannot_hide_a_structured_request(self):
+        fields = {
+            "chat/completions": [
+                '"response_format":{"type":"json_object"},"response_format":{"type":"text"}',
+                '"response_format":{"type":"text"},"response_format":{"type":"json_object"}',
+                '"response_format":{"type":"json_object","type":"text"}',
+            ],
+            "responses": [
+                '"text":{"format":{"type":"json_object"}},"text":{"format":{"type":"text"}}',
+                '"text":{"format":{"type":"text"}},"text":{"format":{"type":"json_object"}}',
+                '"text":{"format":{"type":"json_object"},"format":{"type":"text"}}',
+                '"text":{"format":{"type":"json_object","type":"text"}}',
+            ],
+        }
+        for api, variants in fields.items():
+            body = ({"messages": [{"role": "user", "content": "Return JSON."}], "reasoning_effort": "none"}
+                    if api == "chat/completions" else {"input": "Return JSON.", "reasoning": {"effort": "none"}})
+            for stream in (False, True):
+                for duplicate in variants:
+                    raw = (json.dumps({**body, "stream": stream})[:-1] + "," + duplicate + "}").encode()
+                    with self.subTest(api=api, stream=stream, duplicate=duplicate):
+                        code, out = self.post("/v1/" + api, raw)
+                        self.assertEqual(code, 400, out)
+                        self.assertIn("duplicate JSON key", out["error"]["message"])
+
+    def test_json_object_rejects_duplicates_outside_a_schema(self):
+        for api in ("chat/completions", "responses"):
+            body = ({"messages": [{"role": "user", "content": "Return JSON."}], "reasoning_effort": "none",
+                     "response_format": {"type": "json_object"}} if api == "chat/completions" else
+                    {"input": "Return JSON.", "reasoning": {"effort": "none"}, "text": {"format": {"type": "json_object"}}})
+            for stream in (False, True):
+                raw = (json.dumps({**body, "stream": stream})[:-1] + ',"metadata":{"n":9,"n":1}}').encode()
+                with self.subTest(api=api, stream=stream):
+                    code, out = self.post("/v1/" + api, raw)
+                    self.assertEqual(code, 400, out)
+                    self.assertIn("duplicate JSON key: n", out["error"]["message"])
+
+    def test_repeated_keys_in_distinct_objects_and_json_looking_strings_remain_valid(self):
+        # JSON inside a string is data. Reusing a name in different objects is also unambiguous.
+        text = '{"n":9,"n":1}'
+        value = {"left": {"n": 9}, "right": {"n": 1}, "message": text}
+        with mock.patch.object(self.svc.engine, "script", self.svc.tok.encode(json.dumps(value)) + [257]):
+            for api in ("chat/completions", "responses"):
+                body = ({"messages": [{"role": "user", "content": text}], "reasoning_effort": "none",
+                         "response_format": {"type": "json_object"}} if api == "chat/completions" else
+                        {"input": text, "reasoning": {"effort": "none"}, "text": {"format": {"type": "json_object"}}})
+                code, out = self.post("/v1/" + api, body)
+                self.assertEqual(code, 200, out)
+                answer = (out["choices"][0]["message"]["content"] if api == "chat/completions" else
+                          out["output"][-1]["content"][0]["text"])
+                self.assertEqual(json.loads(answer), value)
+
+    def test_plain_inference_requests_also_reject_duplicate_envelope_fields(self):
+        for path in ("/v1/chat/completions", "/v1/responses", "/v1/messages"):
+            body = ({"input": "hi"} if path == "/v1/responses" else
+                    {"messages": [{"role": "user", "content": "hi"}]})
+            raw = (json.dumps(body)[:-1] + ',"max_tokens":8,"max_tokens":16}').encode()
+            with self.subTest(path=path):
+                code, out = self.post(path, raw)
+                self.assertEqual(code, 400, out)
+                self.assertIn("duplicate JSON key: max_tokens", out["error"]["message"])
+
     def test_a_good_request_still_answers(self):
         code, out = self.post("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8})
         self.assertEqual(code, 200, out)

@@ -1,0 +1,58 @@
+{
+  "reviewed_commit": "eb69d0012bba43aa35e430c4a92746936ecb15d1",
+  "recorded_at_utc": "2026-10-26T20:25:19.822421+00:00",
+  "python": "3.12.3",
+  "dependencies": {
+    "llguidance": "1.9.1",
+    "jsonschema": "4.26.0",
+    "idna": "3.20"
+  },
+  "source_sha256": {
+    "serve/server.py": "f5d4648e37774ab62bbe7fcbd825c65c987532680f2e1dcb55848667b6f27c86",
+    "serve/test_request_hardening.py": "4883e5fe7b71ba1bd16e8e52881bfc81a6161770cf1844f7abe8a490bfe7d2c8",
+    "serve/constrain.py": "d7f27198b5a92c72774e98c49f8991df629a9e0ab80a43007ba13d61bf56a3a8",
+    "serve/frontend.py": "229cecf06324dcf0f10e278dc4ec16b040ad91797a841466aa915f30999921e8",
+    "serve/responses.py": "343f0805ab4f789d290f9ee4cff5c74c345bd19ebacc38ba44076d1402afbf46",
+    ".github/workflows/structured-output.yml": "3e32765ab13a0cf353288bb648339726d21c7a3e13404032aba2014cb4b3b557"
+  },
+  "checks": {
+    "request_hardening_tests": 18,
+    "selected_cpu_tests": 128,
+    "selected_group_counts": [
+      18,
+      18,
+      22,
+      10,
+      50,
+      3,
+      4,
+      3
+    ],
+    "invalid_request_combinations": 50,
+    "before_http_statuses": [
+      400,
+      400,
+      200,
+      200
+    ],
+    "after_http_statuses": [
+      400,
+      400,
+      400,
+      400
+    ]
+  },
+  "limits": {
+    "ci": "intentionally disabled; local execution only",
+    "engine": "existing mock HTTP fixture; no new GPU execution",
+    "broader_suites": "not rerun; previous results historical"
+  },
+  "artifact_sha256": {
+    "README.md": "4b8f99152a537f6dbe3222d7d16ee3f6355bca73b9f37a9f1b54d973d8b9a6ec",
+    "cpu-tests.log.gz": "b85405b76b776819e6929dfc5ca1023ad21c77163d7090dbea5fbc70102f6f39",
+    "http-after.json.gz": "df51cbae0bd9458a3fdd9b75fc31bf78483f5faa3b29e3785e3ea82121493e18",
+    "http-before.json.gz": "02f1923a5299a27d82f98d06b438755a75ccdfeb38590cebd987afe1aa03adf4",
+    "regressions-before.log.gz": "2d3072647866cd29e6418db320eb009412af1b57ed1b5e0195b0b4dcc2cd7171",
+    "request-hardening.log.gz": "344fbadb2b2545eaa17b25a65700465864b8902224841b1461ab1849119172a6"
+  }
+}

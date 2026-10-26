@@ -1,0 +1,100 @@
+{
+  "reviewed_commit": "afb498ec470330899db27161e35eb18beb199787",
+  "created_utc": "2026-10-26T16:05:36.258815+00:00",
+  "python": "3.12.3",
+  "dependencies": {
+    "jsonschema": "4.26.0",
+    "llguidance": "1.9.1",
+    "idna": "3.20"
+  },
+  "runs": {
+    "single": {
+      "pid": 494780,
+      "recovery_pairs": 12,
+      "recovery_statuses": [
+        502
+      ],
+      "recovery_successes": 12,
+      "acceptance_checks": 28,
+      "campaign_successes": 128,
+      "campaign_errors": 0,
+      "campaign_seed": 3800,
+      "stages": [],
+      "configured_gpus": [
+        0
+      ]
+    },
+    "dual": {
+      "pid": 511840,
+      "recovery_pairs": 12,
+      "recovery_statuses": [
+        502
+      ],
+      "recovery_successes": 12,
+      "acceptance_checks": 28,
+      "campaign_successes": 128,
+      "campaign_errors": 0,
+      "campaign_seed": 3800,
+      "stages": [
+        {
+          "stage": 0,
+          "layer_start": 0,
+          "layer_end": 23,
+          "engine_ordinal": 0
+        },
+        {
+          "stage": 1,
+          "layer_start": 24,
+          "layer_end": 47,
+          "engine_ordinal": 1
+        }
+      ],
+      "configured_gpus": [
+        0,
+        1
+      ]
+    }
+  },
+  "cpu_tests": 103,
+  "runtime_sources_sha256": {
+    "serve/structured.py": "2a02340598c5aba4c818510cf41b16d4f1157d726de02abeb80640d7d9b847e9",
+    "serve/constrain.py": "d7f27198b5a92c72774e98c49f8991df629a9e0ab80a43007ba13d61bf56a3a8",
+    "serve/responses.py": "343f0805ab4f789d290f9ee4cff5c74c345bd19ebacc38ba44076d1402afbf46",
+    "serve/server.py": "76387653fb23217e1015bb39023559c788624fc1609655da30933dbaefd5fb91",
+    "tools/strata_tokenizer.py": "6db1ea62d3edbaa64dce139088146ccf370933998d5f997cd5f41a39300075a6",
+    "tools/check_structured_output.py": "77a205c105ded702c40bc8146e2058f296b9a231923313a4b4af4c6de7ea52c7"
+  },
+  "check_recovery_function_sha256": "c26d3771699c1ce68ae3d13b55c44cbb770786280d9da946535a2539a0cc5789",
+  "native_build": {
+    "source": "local",
+    "version": "0.1.51",
+    "archs": [
+      89
+    ],
+    "vision": "none",
+    "cuda_dirs": [
+      "/usr/local/cuda-13.1/bin",
+      "/usr/local/cuda-13.1/lib64"
+    ],
+    "src": "af8f67533b576bf2",
+    "vision_src": null
+  },
+  "native_binary_sha256": "7bb03ccfb509d57cb4d4a61b0fb48624b26297f479298ec073c42fed2263174a",
+  "campaign_successes_total": 256,
+  "hardware_requests_per_run": 180,
+  "files_sha256": {
+    "format-before-after.json": "57941bda9e5058b69eb2fc4487f4568a7361d2adb56a7b55980078e51b2c6c84",
+    "single-engine.log.gz": "253a26e74e25bfbc4bff7072fdd30a237254a77d020579fb3a6c80b1c5e1185d",
+    "dual-recovery.json.gz": "bcc021a35fa885c42b84bd4b4fb8c1b86fe6c2a6e47d4f4aaa9c3a1c275da42c",
+    "single-server.log.gz": "9bdd712fe353e813358992d9c4ed55902824d4ea9fe5ebce2483960ed6956e72",
+    "official-format-cases-final.json": "d8c100a3a3e39a78c0ae3cb7326cba0fe1e76513764a598fdfffeef40f0de866",
+    "single-http.log.gz": "58d02143ecf87fafb213da60c3924b1313ffac72df32ec8982133effe6ca7505",
+    "dual-engine.log.gz": "635ad3deb6d9f339d0ce441173f04e420ac96b55ef6df8fdb3a3d8ecf6a9d5b2",
+    "cpu-tests.log.gz": "44b528e2d2ece213479ee348568dec03e635c5202c4ec81a0833e9d2d6cbe6fe",
+    "dual-server.log.gz": "4952b7dc9073a0405a91743c86eff72f3fe2b430d90003ec1d0c52f1cc08dfff",
+    "dual-http.log.gz": "e710ff0cfb9f39b8a60cce8d96d663e4e771e94437685c7b738a82c16b363165",
+    "dual-http.json.gz": "8cd7d92a0493d094b37529e46b9eb99e14fb56cf046cacbed38efb652e7be986",
+    "single-http.json.gz": "94a56115fbf9b83f49c038fb008212d266c47872cc7e430eb0c8999b9692aa28",
+    "single-recovery.json.gz": "b9b95389a15d28ed5d398a53fa14b56e71bbe4e2f5c287a3498ac64442116038"
+  }
+}
