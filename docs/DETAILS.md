@@ -491,6 +491,22 @@ applies at the next start. Network, key, MCP and program keys are not editable t
   without it the answer is only checked to be one JSON object. Malformed output returns **502** with
   `error.code: structured_output_failed`, an invalid schema **400**. JSON formats combined with tools or MCP are refused.
   Streaming buffers the answer and emits content only after validation.
+This is **schema prompting followed by server validation** on the ordinary path. When the engine takes token masks
+(its INFO line says `token_mask=1`) and the Python package `llguidance` is installed (setup adds it), the chat
+route's JSON formats are also **grammar-constrained**: before every generation window the engine asks the server
+(MQ) and the server answers with the tokens the grammar allows (MK) or free sampling (MF), so every emitted token
+advances the schema; a turn that opens a tool call leaves the grammar. Without the engine support or the package
+the server says so once and validation after the turn is all there is. Either way one generation is made per
+request, with no hidden retry. Successful responses contain a validated JSON object. Malformed JSON,
+duplicate keys, non-finite numbers, schema violations and incomplete generations return **502** with
+`error.code: structured_output_failed`; invalid request schemas return **400**. JSON formats combined with
+tools/MCP are refused explicitly. Without `response_format`, ordinary text and tool behavior stays the same.
+
+Structured SSE buffers the answer while sending keep-alive comments. It emits content only after validation,
+then usage/timings and `[DONE]`; failures emit an SSE error and `[DONE]` without invalid content deltas.
+`/v1/status.structured_output` advertises the formats, validation method and buffered streaming behavior; its
+`constrained_decoding` says whether the token masks are live for this server.
+
 - `logit_bias` and token/bias pair lists work on CUDA and HIP engines without continuous batching ([LOGIT_BIAS.md](LOGIT_BIAS.md)).
 - Stop strings (`stop`, `stop_sequences`), `temperature`, `top_p`, `top_k`, `min_p` and `seed` are honored per request.
   `top_k` keeps at most 64 candidates. Penalties (`presence_penalty`, `frequency_penalty`, `repetition_penalty`,
